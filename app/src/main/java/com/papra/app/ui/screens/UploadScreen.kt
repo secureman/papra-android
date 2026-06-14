@@ -178,7 +178,7 @@ private fun EmptyState() {
                 color = MaterialTheme.colorScheme.outline
             )
             Text(
-                "Tap "Pick files" to get started",
+                "Tap 'Pick files' to get started",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outlineVariant
             )
