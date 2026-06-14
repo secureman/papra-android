@@ -3,7 +3,6 @@ package com.papra.app.ui.screens
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,10 +17,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.launch
+import androidx.compose.ui.window.Dialog
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun UploadScreen(
     viewModel: UploadViewModel,
@@ -29,7 +27,6 @@ fun UploadScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
@@ -42,6 +39,19 @@ fun UploadScreen(
             snackbarHostState.showSnackbar(msg)
             viewModel.clearSnackbar()
         }
+    }
+
+    // Tag picker dialog
+    if (state.tagPickerDocumentId != null) {
+        TagPickerDialog(
+            documentName = state.tagPickerDocumentName ?: "",
+            tags = state.availableTags,
+            selectedTagIds = state.selectedTagIds,
+            isLoading = state.isLoadingTags,
+            onToggleTag = { viewModel.toggleTag(it) },
+            onConfirm = { viewModel.confirmTags() },
+            onDismiss = { viewModel.dismissTagPicker() }
+        )
     }
 
     Scaffold(
@@ -65,12 +75,33 @@ fun UploadScreen(
                 .padding(padding)
                 .padding(horizontal = 16.dp)
         ) {
+            // Offline banner
+            if (state.isOffline) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Default.WifiOff, contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onErrorContainer)
+                        Text("No internet connection",
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+
             if (!state.settings.isConfigured) {
                 ConfigWarningBanner(onGoToSettings)
                 Spacer(Modifier.height(12.dp))
             }
 
-            // Pick files button
             OutlinedButton(
                 onClick = { filePicker.launch("*/*") },
                 modifier = Modifier.fillMaxWidth(),
@@ -119,11 +150,79 @@ fun UploadScreen(
                             strokeWidth = 2.dp
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("Uploading…")
+                        Text("Uploading...")
                     } else {
                         Icon(Icons.Default.CloudUpload, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
-                        Text("Upload ${state.files.count { it.status == UploadStatus.PENDING || it.status == UploadStatus.FAILED }} file(s)")
+                        val count = state.files.count {
+                            it.status == UploadStatus.PENDING || it.status == UploadStatus.FAILED
+                        }
+                        Text("Upload $count file(s)")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TagPickerDialog(
+    documentName: String,
+    tags: List<com.papra.app.data.api.PapraTag>,
+    selectedTagIds: Set<String>,
+    isLoading: Boolean,
+    onToggleTag: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            tonalElevation = 6.dp
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text("Tag document", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Text(documentName, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(16.dp))
+
+                when {
+                    isLoading -> {
+                        Box(Modifier.fillMaxWidth().height(60.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        }
+                    }
+                    tags.isEmpty() -> {
+                        Text("No tags found. Create tags in Papra first.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline)
+                    }
+                    else -> {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            tags.forEach { tag ->
+                                val selected = tag.id in selectedTagIds
+                                FilterChip(
+                                    selected = selected,
+                                    onClick = { onToggleTag(tag.id) },
+                                    label = { Text(tag.name) },
+                                    leadingIcon = if (selected) {
+                                        { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                    } else null
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(20.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
+                        Text("Skip")
+                    }
+                    Button(onClick = onConfirm, modifier = Modifier.weight(1f)) {
+                        Text(if (selectedTagIds.isEmpty()) "Done" else "Add ${selectedTagIds.size} tag(s)")
                     }
                 }
             }
@@ -142,21 +241,14 @@ private fun ConfigWarningBanner(onGoToSettings: () -> Unit) {
             modifier = Modifier.padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                Icons.Default.Warning,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onErrorContainer
-            )
+            Icon(Icons.Default.Warning, contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer)
             Spacer(Modifier.width(8.dp))
-            Text(
-                "Configure your Papra instance first",
+            Text("Configure your Papra instance first",
                 modifier = Modifier.weight(1f),
                 color = MaterialTheme.colorScheme.onErrorContainer,
-                style = MaterialTheme.typography.bodySmall
-            )
-            TextButton(onClick = onGoToSettings) {
-                Text("Settings")
-            }
+                style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = onGoToSettings) { Text("Settings") }
         }
     }
 }
@@ -165,23 +257,14 @@ private fun ConfigWarningBanner(onGoToSettings: () -> Unit) {
 private fun EmptyState() {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(
-                Icons.Default.CloudUpload,
-                contentDescription = null,
+            Icon(Icons.Default.CloudUpload, contentDescription = null,
                 modifier = Modifier.size(56.dp),
-                tint = MaterialTheme.colorScheme.outlineVariant
-            )
+                tint = MaterialTheme.colorScheme.outlineVariant)
             Spacer(Modifier.height(12.dp))
-            Text(
-                "No files selected",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.outline
-            )
-            Text(
-                "Tap 'Pick files' to get started",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outlineVariant
-            )
+            Text("No files selected", style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.outline)
+            Text("Tap 'Pick files' to get started", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outlineVariant)
         }
     }
 }
@@ -216,18 +299,10 @@ private fun FileUploadCard(
                 )
                 Spacer(Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        item.name,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        formatSize(item.size),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.outline
-                    )
+                    Text(item.name, style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(formatSize(item.size), style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline)
                 }
                 when (item.status) {
                     UploadStatus.PENDING, UploadStatus.DONE -> {
@@ -250,20 +325,14 @@ private fun FileUploadCard(
                 Spacer(Modifier.height(8.dp))
                 LinearProgressIndicator(
                     progress = { item.progress / 100f },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp))
+                    modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp))
                 )
             }
 
             if (item.status == UploadStatus.FAILED && item.errorMessage != null) {
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    item.errorMessage,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error
-                )
+                Text(item.errorMessage, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error)
             }
         }
     }

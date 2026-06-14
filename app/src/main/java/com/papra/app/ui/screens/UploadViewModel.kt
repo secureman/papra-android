@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.papra.app.data.api.ApiResult
 import com.papra.app.data.api.PapraApiClient
+import com.papra.app.data.api.PapraTag
 import com.papra.app.data.datastore.PapraSettings
 import com.papra.app.data.datastore.SettingsRepository
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,14 +24,23 @@ data class FileUploadItem(
     val size: Long,
     val status: UploadStatus = UploadStatus.PENDING,
     val progress: Int = 0,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val documentId: String? = null
 )
 
 data class UploadScreenState(
     val files: List<FileUploadItem> = emptyList(),
     val isUploading: Boolean = false,
     val snackbarMessage: String? = null,
-    val settings: PapraSettings = PapraSettings()
+    val settings: PapraSettings = PapraSettings(),
+    // Tag picker state
+    val tagPickerDocumentId: String? = null,
+    val tagPickerDocumentName: String? = null,
+    val availableTags: List<PapraTag> = emptyList(),
+    val selectedTagIds: Set<String> = emptySet(),
+    val isLoadingTags: Boolean = false,
+    // Offline
+    val isOffline: Boolean = false
 )
 
 class UploadViewModel(application: Application) : AndroidViewModel(application) {
@@ -55,11 +65,7 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
 
     fun addFiles(uris: List<Uri>) {
         val newItems = uris.map { uri ->
-            FileUploadItem(
-                uri = uri,
-                name = resolveFileName(uri),
-                size = resolveFileSize(uri)
-            )
+            FileUploadItem(uri = uri, name = resolveFileName(uri), size = resolveFileSize(uri))
         }
         _state.update { it.copy(files = it.files + newItems) }
     }
@@ -85,9 +91,9 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
         if (pendingFiles.isEmpty()) return
 
         viewModelScope.launch {
-            _state.update { it.copy(isUploading = true) }
+            _state.update { it.copy(isUploading = true, isOffline = false) }
 
-            pendingFiles.forEach { item ->
+            for (item in pendingFiles) {
                 setFileStatus(item.uri, UploadStatus.UPLOADING)
 
                 val result = api.uploadDocument(
@@ -95,15 +101,22 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
                     apiKey = settings.apiKey,
                     organizationId = settings.organizationId,
                     uri = item.uri,
-                    onProgress = { progress ->
-                        updateFileProgress(item.uri, progress)
-                    }
+                    onProgress = { progress -> updateFileProgress(item.uri, progress) }
                 )
 
                 when (result) {
-                    is ApiResult.Success -> setFileStatus(item.uri, UploadStatus.DONE)
+                    is ApiResult.Success -> {
+                        setFileDone(item.uri, result.data)
+                        // After last file uploads, open tag picker for first uploaded doc
+                        if (item == pendingFiles.last() && result.data.isNotBlank()) {
+                            openTagPicker(result.data, item.name, settings)
+                        }
+                    }
                     is ApiResult.Error -> setFileError(item.uri, result.message)
-                    is ApiResult.NetworkError -> setFileError(item.uri, result.message)
+                    is ApiResult.NetworkError -> {
+                        setFileError(item.uri, result.message)
+                        _state.update { it.copy(isOffline = true) }
+                    }
                 }
             }
 
@@ -114,7 +127,7 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
                 it.copy(
                     isUploading = false,
                     snackbarMessage = when {
-                        failCount == 0 -> "$doneCount file(s) uploaded successfully"
+                        failCount == 0 -> null // tag picker will show instead
                         doneCount == 0 -> "All uploads failed"
                         else -> "$doneCount uploaded, $failCount failed"
                     }
@@ -135,15 +148,79 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
         uploadAll()
     }
 
+    // ── Tag picker ────────────────────────────────────────────────────────────
+
+    private suspend fun openTagPicker(documentId: String, documentName: String, settings: PapraSettings) {
+        _state.update { it.copy(isLoadingTags = true) }
+        val result = api.listTags(settings.baseUrl, settings.apiKey, settings.organizationId)
+        val tags = if (result is ApiResult.Success) result.data else emptyList()
+        _state.update {
+            it.copy(
+                tagPickerDocumentId = documentId,
+                tagPickerDocumentName = documentName,
+                availableTags = tags,
+                selectedTagIds = emptySet(),
+                isLoadingTags = false
+            )
+        }
+    }
+
+    fun toggleTag(tagId: String) {
+        _state.update {
+            val current = it.selectedTagIds
+            it.copy(selectedTagIds = if (tagId in current) current - tagId else current + tagId)
+        }
+    }
+
+    fun confirmTags() {
+        val s = _state.value
+        val docId = s.tagPickerDocumentId ?: return
+        val settings = s.settings
+        val selectedIds = s.selectedTagIds.toList()
+
+        viewModelScope.launch {
+            selectedIds.forEach { tagId ->
+                api.addTagToDocument(settings.baseUrl, settings.apiKey, settings.organizationId, docId, tagId)
+            }
+            _state.update {
+                it.copy(
+                    tagPickerDocumentId = null,
+                    tagPickerDocumentName = null,
+                    selectedTagIds = emptySet(),
+                    snackbarMessage = if (selectedIds.isNotEmpty()) "${selectedIds.size} tag(s) added" else "Uploaded successfully"
+                )
+            }
+        }
+    }
+
+    fun dismissTagPicker() {
+        _state.update {
+            it.copy(
+                tagPickerDocumentId = null,
+                tagPickerDocumentName = null,
+                selectedTagIds = emptySet(),
+                snackbarMessage = "Uploaded successfully"
+            )
+        }
+    }
+
     fun clearSnackbar() {
         _state.update { it.copy(snackbarMessage = null) }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private fun setFileStatus(uri: Uri, status: UploadStatus) {
         _state.update {
             it.copy(files = it.files.map { f -> if (f.uri == uri) f.copy(status = status) else f })
+        }
+    }
+
+    private fun setFileDone(uri: Uri, documentId: String) {
+        _state.update {
+            it.copy(files = it.files.map { f ->
+                if (f.uri == uri) f.copy(status = UploadStatus.DONE, documentId = documentId) else f
+            })
         }
     }
 

@@ -10,8 +10,11 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.MediaType.Companion.toMediaTypeOrNull as toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
 import okio.source
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -26,7 +29,14 @@ data class PapraDocument(
     val id: String,
     val name: String,
     val createdAt: String,
-    val size: Long
+    val size: Long,
+    val tags: List<PapraTag> = emptyList()
+)
+
+data class PapraTag(
+    val id: String,
+    val name: String,
+    val color: String = ""
 )
 
 class PapraApiClient(private val context: Context) {
@@ -60,7 +70,7 @@ class PapraApiClient(private val context: Context) {
             }
         }
 
-    // ── Upload document ──────────────────────────────────────────────────────
+    // ── Upload document — returns document ID ────────────────────────────────
 
     suspend fun uploadDocument(
         baseUrl: String,
@@ -68,7 +78,7 @@ class PapraApiClient(private val context: Context) {
         organizationId: String,
         uri: Uri,
         onProgress: (Int) -> Unit = {}
-    ): ApiResult<Unit> = withContext(Dispatchers.IO) {
+    ): ApiResult<String> = withContext(Dispatchers.IO) {
         try {
             val fileName = resolveFileName(uri)
             val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
@@ -111,7 +121,11 @@ class PapraApiClient(private val context: Context) {
                 when {
                     response.isSuccessful -> {
                         onProgress(100)
-                        ApiResult.Success(Unit)
+                        val body = response.body?.string() ?: "{}"
+                        val docId = try {
+                            JSONObject(body).optJSONObject("document")?.optString("id") ?: ""
+                        } catch (e: Exception) { "" }
+                        ApiResult.Success(docId)
                     }
                     response.code == 401 -> ApiResult.Error(401, "Invalid API key")
                     response.code == 409 -> ApiResult.Error(409, "Document already exists")
@@ -128,11 +142,17 @@ class PapraApiClient(private val context: Context) {
     suspend fun listDocuments(
         baseUrl: String,
         apiKey: String,
-        organizationId: String
+        organizationId: String,
+        search: String = ""
     ): ApiResult<List<PapraDocument>> = withContext(Dispatchers.IO) {
         try {
+            val url = if (search.isBlank())
+                "$baseUrl/api/organizations/$organizationId/documents"
+            else
+                "$baseUrl/api/organizations/$organizationId/documents/search?searchQuery=${Uri.encode(search)}"
+
             val request = Request.Builder()
-                .url("$baseUrl/api/organizations/$organizationId/documents")
+                .url(url)
                 .header("Authorization", "Bearer $apiKey")
                 .get()
                 .build()
@@ -140,13 +160,117 @@ class PapraApiClient(private val context: Context) {
             client.newCall(request).execute().use { response ->
                 when {
                     response.isSuccessful -> {
-                        val body = response.body?.string() ?: "[]"
-                        val docs = parseDocuments(body)
-                        ApiResult.Success(docs)
+                        val body = response.body?.string() ?: "{}"
+                        ApiResult.Success(parseDocuments(body))
                     }
                     response.code == 401 -> ApiResult.Error(401, "Invalid API key")
                     else -> ApiResult.Error(response.code, "HTTP ${response.code}")
                 }
+            }
+        } catch (e: IOException) {
+            ApiResult.NetworkError(e.message ?: "Network error")
+        }
+    }
+
+    // ── Delete document ──────────────────────────────────────────────────────
+
+    suspend fun deleteDocument(
+        baseUrl: String,
+        apiKey: String,
+        organizationId: String,
+        documentId: String
+    ): ApiResult<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val request = Request.Builder()
+                .url("$baseUrl/api/organizations/$organizationId/documents/$documentId")
+                .header("Authorization", "Bearer $apiKey")
+                .delete()
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.isSuccessful -> ApiResult.Success(Unit)
+                    response.code == 401 -> ApiResult.Error(401, "Invalid API key")
+                    response.code == 404 -> ApiResult.Error(404, "Document not found")
+                    else -> ApiResult.Error(response.code, "HTTP ${response.code}")
+                }
+            }
+        } catch (e: IOException) {
+            ApiResult.NetworkError(e.message ?: "Network error")
+        }
+    }
+
+    // ── Tags ─────────────────────────────────────────────────────────────────
+
+    suspend fun listTags(
+        baseUrl: String,
+        apiKey: String,
+        organizationId: String
+    ): ApiResult<List<PapraTag>> = withContext(Dispatchers.IO) {
+        try {
+            val request = Request.Builder()
+                .url("$baseUrl/api/organizations/$organizationId/tags")
+                .header("Authorization", "Bearer $apiKey")
+                .get()
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.isSuccessful -> {
+                        val body = response.body?.string() ?: "{}"
+                        ApiResult.Success(parseTags(body))
+                    }
+                    else -> ApiResult.Error(response.code, "HTTP ${response.code}")
+                }
+            }
+        } catch (e: IOException) {
+            ApiResult.NetworkError(e.message ?: "Network error")
+        }
+    }
+
+    suspend fun addTagToDocument(
+        baseUrl: String,
+        apiKey: String,
+        organizationId: String,
+        documentId: String,
+        tagId: String
+    ): ApiResult<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val body = JSONObject().put("tagId", tagId).toString()
+                .toRequestBody("application/json".toMediaType())
+
+            val request = Request.Builder()
+                .url("$baseUrl/api/organizations/$organizationId/documents/$documentId/tags")
+                .header("Authorization", "Bearer $apiKey")
+                .post(body)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) ApiResult.Success(Unit)
+                else ApiResult.Error(response.code, "HTTP ${response.code}")
+            }
+        } catch (e: IOException) {
+            ApiResult.NetworkError(e.message ?: "Network error")
+        }
+    }
+
+    suspend fun removeTagFromDocument(
+        baseUrl: String,
+        apiKey: String,
+        organizationId: String,
+        documentId: String,
+        tagId: String
+    ): ApiResult<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val request = Request.Builder()
+                .url("$baseUrl/api/organizations/$organizationId/documents/$documentId/tags/$tagId")
+                .header("Authorization", "Bearer $apiKey")
+                .delete()
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) ApiResult.Success(Unit)
+                else ApiResult.Error(response.code, "HTTP ${response.code}")
             }
         } catch (e: IOException) {
             ApiResult.NetworkError(e.message ?: "Network error")
@@ -179,15 +303,44 @@ class PapraApiClient(private val context: Context) {
     private fun parseDocuments(json: String): List<PapraDocument> {
         return try {
             val root = JSONObject(json)
-            // Papra returns { documents: [...] }
             val array = root.optJSONArray("documents") ?: return emptyList()
             (0 until array.length()).map { i ->
                 val obj = array.getJSONObject(i)
+                val tagsArray = obj.optJSONArray("tags")
+                val tags = if (tagsArray != null) {
+                    (0 until tagsArray.length()).map { j ->
+                        val t = tagsArray.getJSONObject(j)
+                        PapraTag(
+                            id = t.optString("id", ""),
+                            name = t.optString("name", ""),
+                            color = t.optString("color", "")
+                        )
+                    }
+                } else emptyList()
+
                 PapraDocument(
                     id = obj.optString("id", ""),
                     name = obj.optString("name", "Untitled"),
                     createdAt = obj.optString("createdAt", ""),
-                    size = obj.optLong("fileSize", 0L)
+                    size = obj.optLong("fileSize", 0L),
+                    tags = tags
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun parseTags(json: String): List<PapraTag> {
+        return try {
+            val root = JSONObject(json)
+            val array = root.optJSONArray("tags") ?: return emptyList()
+            (0 until array.length()).map { i ->
+                val obj = array.getJSONObject(i)
+                PapraTag(
+                    id = obj.optString("id", ""),
+                    name = obj.optString("name", ""),
+                    color = obj.optString("color", "")
                 )
             }
         } catch (e: Exception) {
