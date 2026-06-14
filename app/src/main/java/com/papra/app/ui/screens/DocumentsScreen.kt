@@ -243,12 +243,12 @@ private fun DocumentCard(doc: PapraDocument, onDelete: () -> Unit) {
 
 @Composable
 private fun TagChip(tag: PapraTag) {
-    val color = try {
-        if (tag.color.isNotBlank()) Color(android.graphics.Color.parseColor(tag.color))
-        else MaterialTheme.colorScheme.secondaryContainer
-    } catch (e: Exception) {
-        MaterialTheme.colorScheme.secondaryContainer
+    val parsedColor = remember(tag.color) {
+        if (tag.color.isNotBlank()) {
+            try { android.graphics.Color.parseColor(tag.color) } catch (e: Exception) { null }
+        } else null
     }
+    val color = if (parsedColor != null) Color(parsedColor) else MaterialTheme.colorScheme.secondaryContainer
 
     Surface(
         color = color.copy(alpha = 0.2f),
