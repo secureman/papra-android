@@ -19,11 +19,10 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.papra.app.navigation.Screen
-import com.papra.app.ui.screens.DocumentsScreen
-import com.papra.app.ui.screens.SettingsScreen
-import com.papra.app.ui.screens.UploadScreen
-import com.papra.app.ui.screens.UploadViewModel
+import com.papra.app.navigation.ViewerScreen
+import com.papra.app.ui.screens.*
 import com.papra.app.ui.theme.PapraTheme
+import java.net.URLDecoder
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -32,20 +31,14 @@ class MainActivity : ComponentActivity() {
 
         val sharedUris = mutableListOf<Uri>()
         when (intent?.action) {
-            Intent.ACTION_SEND -> {
-                intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)?.let { sharedUris.add(it) }
-            }
-            Intent.ACTION_SEND_MULTIPLE -> {
-                intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.let {
-                    sharedUris.addAll(it)
-                }
-            }
+            Intent.ACTION_SEND ->
+                (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { sharedUris.add(it) }
+            Intent.ACTION_SEND_MULTIPLE ->
+                intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.let { sharedUris.addAll(it) }
         }
 
         setContent {
-            PapraTheme {
-                PapraApp(initialSharedUris = sharedUris)
-            }
+            PapraTheme { PapraApp(initialSharedUris = sharedUris) }
         }
     }
 }
@@ -54,11 +47,8 @@ class MainActivity : ComponentActivity() {
 fun PapraApp(initialSharedUris: List<Uri> = emptyList()) {
     val context = LocalContext.current
     val navController = rememberNavController()
-
     val uploadViewModel: UploadViewModel = viewModel(
-        factory = ViewModelProvider.AndroidViewModelFactory.getInstance(
-            context.applicationContext as android.app.Application
-        )
+        factory = ViewModelProvider.AndroidViewModelFactory(context.applicationContext as android.app.Application)
     )
 
     LaunchedEffect(initialSharedUris) {
@@ -66,33 +56,32 @@ fun PapraApp(initialSharedUris: List<Uri> = emptyList()) {
             uploadViewModel.addFiles(initialSharedUris)
             navController.navigate(Screen.Upload.route) {
                 popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                launchSingleTop = true
-                restoreState = true
+                launchSingleTop = true; restoreState = true
             }
         }
     }
 
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+    val showBottomBar = currentRoute in Screen.bottomNavItems.map { it.route }
 
     Scaffold(
         bottomBar = {
-            NavigationBar {
-                Screen.bottomNavItems.forEach { screen ->
-                    NavigationBarItem(
-                        selected = currentRoute == screen.route,
-                        onClick = {
-                            navController.navigate(screen.route) {
-                                popUpTo(navController.graph.findStartDestination().id) {
-                                    saveState = true
+            if (showBottomBar) {
+                NavigationBar {
+                    Screen.bottomNavItems.forEach { screen ->
+                        NavigationBarItem(
+                            selected = currentRoute == screen.route,
+                            onClick = {
+                                navController.navigate(screen.route) {
+                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                    launchSingleTop = true; restoreState = true
                                 }
-                                launchSingleTop = true
-                                restoreState = true
-                            }
-                        },
-                        icon = { Icon(screen.icon, contentDescription = screen.label) },
-                        label = { Text(screen.label) }
-                    )
+                            },
+                            icon = { Icon(screen.icon, contentDescription = screen.label) },
+                            label = { Text(screen.label) }
+                        )
+                    }
                 }
             }
         }
@@ -105,18 +94,30 @@ fun PapraApp(initialSharedUris: List<Uri> = emptyList()) {
             composable(Screen.Upload.route) {
                 UploadScreen(
                     viewModel = uploadViewModel,
-                    onGoToSettings = {
-                        navController.navigate(Screen.Settings.route) {
-                            launchSingleTop = true
-                        }
-                    }
+                    onGoToSettings = { navController.navigate(Screen.Settings.route) { launchSingleTop = true } }
                 )
             }
             composable(Screen.Documents.route) {
-                DocumentsScreen()
+                DocumentsScreen(
+                    onOpenPdf = { filePath, name ->
+                        navController.navigate(ViewerScreen.Pdf.createRoute(filePath, name))
+                    },
+                    onOpenImage = { filePath, name ->
+                        navController.navigate(ViewerScreen.Image.createRoute(filePath, name))
+                    }
+                )
             }
-            composable(Screen.Settings.route) {
-                SettingsScreen()
+            composable(Screen.Settings.route) { SettingsScreen() }
+
+            composable(ViewerScreen.Pdf.route) { backStackEntry ->
+                val filePath = URLDecoder.decode(backStackEntry.arguments?.getString("filePath") ?: "", "UTF-8")
+                val name = URLDecoder.decode(backStackEntry.arguments?.getString("documentName") ?: "", "UTF-8")
+                PdfViewerScreen(filePath = filePath, documentName = name, onBack = { navController.popBackStack() })
+            }
+            composable(ViewerScreen.Image.route) { backStackEntry ->
+                val filePath = URLDecoder.decode(backStackEntry.arguments?.getString("filePath") ?: "", "UTF-8")
+                val name = URLDecoder.decode(backStackEntry.arguments?.getString("documentName") ?: "", "UTF-8")
+                ImageViewerScreen(filePath = filePath, documentName = name, onBack = { navController.popBackStack() })
             }
         }
     }

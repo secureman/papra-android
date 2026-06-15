@@ -1,17 +1,16 @@
 package com.papra.app.ui.screens
 
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.pdf.PdfRenderer
-import android.net.Uri
-import android.os.ParcelFileDescriptor
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.BorderStroke
+import android.webkit.MimeTypeMap
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -21,12 +20,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.FileProvider
 import com.papra.app.data.api.ApiResult
 import com.papra.app.data.api.PapraApiClient
@@ -34,18 +35,21 @@ import com.papra.app.data.api.PapraDocument
 import com.papra.app.data.api.PapraTag
 import com.papra.app.data.datastore.PapraSettings
 import com.papra.app.data.datastore.SettingsRepository
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.File
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
+enum class SortField { NAME, DATE }
+enum class SortOrder { ASC, DESC }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DocumentsScreen() {
+fun DocumentsScreen(
+    onOpenPdf: (filePath: String, name: String) -> Unit,
+    onOpenImage: (filePath: String, name: String) -> Unit
+) {
     val context = LocalContext.current
     val api = remember { PapraApiClient(context) }
     val settingsRepo = remember { SettingsRepository(context) }
@@ -59,124 +63,64 @@ fun DocumentsScreen() {
     var searchQuery by remember { mutableStateOf("") }
     var isSearching by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<PapraDocument?>(null) }
+    var tagTarget by remember { mutableStateOf<PapraDocument?>(null) }
     var renameTarget by remember { mutableStateOf<PapraDocument?>(null) }
-    var viewTarget by remember { mutableStateOf<PapraDocument?>(null) }
-    var tagManagerTarget by remember { mutableStateOf<PapraDocument?>(null) }
-    var createTagOpen by remember { mutableStateOf(false) }
-    var sortBy by remember { mutableStateOf("createdAt") }
-    var sortOrder by remember { mutableStateOf("desc") }
-    var sortMenuOpen by remember { mutableStateOf(false) }
+    var renameValue by remember { mutableStateOf("") }
+    var availableTags by remember { mutableStateOf<List<PapraTag>>(emptyList()) }
+    var openingDocId by remember { mutableStateOf<String?>(null) }
+    var showCreateTag by remember { mutableStateOf(false) }
+    var newTagName by remember { mutableStateOf("") }
+    var newTagColor by remember { mutableStateOf("#3B82F6") }
+    var sortField by remember { mutableStateOf(SortField.DATE) }
+    var sortOrder by remember { mutableStateOf(SortOrder.DESC) }
+    var showSortMenu by remember { mutableStateOf(false) }
+
+    val sortedDocuments = remember(documents, sortField, sortOrder) {
+        val sorted = when (sortField) {
+            SortField.NAME -> documents.sortedBy { it.name.lowercase() }
+            SortField.DATE -> documents.sortedBy { it.createdAt }
+        }
+        if (sortOrder == SortOrder.DESC) sorted.reversed() else sorted
+    }
 
     suspend fun load(query: String = "") {
         isLoading = true
         errorMessage = null
         settings = settingsRepo.settings.first()
         if (settings.isConfigured) {
-            when (val result = api.listDocuments(
-                settings.baseUrl, settings.apiKey, settings.organizationId,
-                query, sortBy, sortOrder
-            )) {
-                is ApiResult.Success -> documents = result.data
-                is ApiResult.Error -> errorMessage = "Error ${result.code}: ${result.message}"
-                is ApiResult.NetworkError -> errorMessage = "Network error: ${result.message}"
+            when (val r = api.listDocuments(settings.baseUrl, settings.apiKey, settings.organizationId, query)) {
+                is ApiResult.Success -> documents = r.data
+                is ApiResult.Error -> errorMessage = "Error ${r.code}: ${r.message}"
+                is ApiResult.NetworkError -> errorMessage = "Network error: ${r.message}"
             }
         }
         isLoading = false
     }
 
-    LaunchedEffect(Unit) { load() }
-
-    viewTarget?.let { doc ->
-        DocumentViewerDialog(
-            document = doc,
-            settings = settings,
-            api = api,
-            onDismiss = { viewTarget = null }
-        )
+    suspend fun loadTags() {
+        if (!settings.isConfigured) return
+        when (val r = api.listTags(settings.baseUrl, settings.apiKey, settings.organizationId)) {
+            is ApiResult.Success -> availableTags = r.data
+            else -> {}
+        }
     }
 
-    tagManagerTarget?.let { doc ->
-        TagManagerDialog(
-            document = doc,
-            settings = settings,
-            api = api,
-            onDismiss = { tagManagerTarget = null },
-            onUpdated = { scope.launch { load(searchQuery) } }
-        )
-    }
+    LaunchedEffect(Unit) { load(); loadTags() }
 
-    if (createTagOpen) {
-        CreateTagDialog(
-            settings = settings,
-            api = api,
-            onDismiss = { createTagOpen = false },
-            onCreated = { scope.launch { load(searchQuery) } }
-        )
-    }
-
-    renameTarget?.let { doc ->
-        var newName by remember { mutableStateOf(doc.name) }
-        AlertDialog(
-            onDismissRequest = { renameTarget = null },
-            title = { Text("Rename document") },
-            text = {
-                OutlinedTextField(
-                    value = newName,
-                    onValueChange = { newName = it },
-                    label = { Text("New name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        renameTarget = null
-                        scope.launch {
-                            val result = api.renameDocument(
-                                settings.baseUrl, settings.apiKey,
-                                settings.organizationId, doc.id, newName
-                            )
-                            when (result) {
-                                is ApiResult.Success -> {
-                                    documents = documents.map { if (it.id == doc.id) it.copy(name = newName) else it }
-                                    snackbarHostState.showSnackbar("Renamed successfully")
-                                }
-                                else -> snackbarHostState.showSnackbar("Rename failed")
-                            }
-                        }
-                    }
-                ) { Text("Save") }
-            },
-            dismissButton = {
-                TextButton(onClick = { renameTarget = null }) { Text("Cancel") }
-            }
-        )
-    }
-
+    // ── Delete dialog ─────────────────────────────────────────────────────────
     deleteTarget?.let { doc ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
             icon = { Icon(Icons.Default.DeleteForever, contentDescription = null) },
             title = { Text("Delete document?") },
-            text = {
-                Text("\"${doc.name}\" will be permanently deleted.",
-                    style = MaterialTheme.typography.bodyMedium)
-            },
+            text = { Text("\"${doc.name}\" will be permanently deleted.") },
             confirmButton = {
                 Button(
                     onClick = {
-                        deleteTarget = null
+                        val target = deleteTarget; deleteTarget = null
                         scope.launch {
-                            val result = api.deleteDocument(
-                                settings.baseUrl, settings.apiKey,
-                                settings.organizationId, doc.id
-                            )
-                            when (result) {
-                                is ApiResult.Success -> {
-                                    documents = documents.filter { it.id != doc.id }
-                                    snackbarHostState.showSnackbar("Deleted")
-                                }
+                            when (api.deleteDocument(settings.baseUrl, settings.apiKey, settings.organizationId, target!!.id)) {
+                                is ApiResult.Success -> { documents = documents.filter { it.id != target.id }; snackbarHostState.showSnackbar("Deleted") }
                                 else -> snackbarHostState.showSnackbar("Delete failed")
                             }
                         }
@@ -184,9 +128,103 @@ fun DocumentsScreen() {
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                 ) { Text("Delete") }
             },
-            dismissButton = {
-                TextButton(onClick = { deleteTarget = null }) { Text("Cancel") }
-            }
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Cancel") } }
+        )
+    }
+
+    // ── Rename dialog ─────────────────────────────────────────────────────────
+    renameTarget?.let { doc ->
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text("Rename document") },
+            text = {
+                OutlinedTextField(
+                    value = renameValue,
+                    onValueChange = { renameValue = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val target = renameTarget; renameTarget = null
+                        scope.launch {
+                            when (val r = api.renameDocument(settings.baseUrl, settings.apiKey, settings.organizationId, target!!.id, renameValue)) {
+                                is ApiResult.Success -> {
+                                    documents = documents.map { if (it.id == target.id) it.copy(name = renameValue) else it }
+                                    snackbarHostState.showSnackbar("Renamed")
+                                }
+                                else -> snackbarHostState.showSnackbar("Rename failed")
+                            }
+                        }
+                    },
+                    enabled = renameValue.isNotBlank()
+                ) { Text("Rename") }
+            },
+            dismissButton = { TextButton(onClick = { renameTarget = null }) { Text("Cancel") } }
+        )
+    }
+
+    // ── Tag manager dialog ────────────────────────────────────────────────────
+    tagTarget?.let { doc ->
+        TagManagerDialog(
+            document = doc,
+            availableTags = availableTags,
+            onDismiss = { tagTarget = null },
+            onAddTag = { tagId ->
+                scope.launch {
+                    api.addTagToDocument(settings.baseUrl, settings.apiKey, settings.organizationId, doc.id, tagId)
+                    load(searchQuery)
+                }
+            },
+            onRemoveTag = { tagId ->
+                scope.launch {
+                    api.removeTagFromDocument(settings.baseUrl, settings.apiKey, settings.organizationId, doc.id, tagId)
+                    load(searchQuery)
+                }
+            },
+            onCreateTag = { showCreateTag = true }
+        )
+    }
+
+    // ── Create tag dialog ─────────────────────────────────────────────────────
+    if (showCreateTag) {
+        AlertDialog(
+            onDismissRequest = { showCreateTag = false },
+            title = { Text("Create tag") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(value = newTagName, onValueChange = { newTagName = it },
+                        label = { Text("Tag name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        value = newTagColor, onValueChange = { newTagColor = it },
+                        label = { Text("Color (hex)") }, placeholder = { Text("#3B82F6") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth(),
+                        leadingIcon = {
+                            val c = remember(newTagColor) {
+                                try { Color(android.graphics.Color.parseColor(newTagColor)) } catch (e: Exception) { Color.Gray }
+                            }
+                            Box(Modifier.size(20.dp).background(c, CircleShape))
+                        }
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showCreateTag = false
+                        scope.launch {
+                            val r = api.createTag(settings.baseUrl, settings.apiKey, settings.organizationId, newTagName, newTagColor)
+                            if (r is ApiResult.Success) { availableTags = availableTags + r.data; snackbarHostState.showSnackbar("Tag created"); newTagName = "" }
+                            else snackbarHostState.showSnackbar("Failed to create tag")
+                        }
+                    },
+                    enabled = newTagName.isNotBlank()
+                ) { Text("Create") }
+            },
+            dismissButton = { TextButton(onClick = { showCreateTag = false }) { Text("Cancel") } }
         )
     }
 
@@ -194,79 +232,48 @@ fun DocumentsScreen() {
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             if (isSearching) {
-                SearchBar(
+                SearchTopBar(
                     query = searchQuery,
                     onQueryChange = { searchQuery = it },
                     onSearch = { scope.launch { load(it) } },
-                    onClose = {
-                        isSearching = false
-                        searchQuery = ""
-                        scope.launch { load() }
-                    }
+                    onClose = { isSearching = false; searchQuery = ""; scope.launch { load() } }
                 )
             } else {
                 TopAppBar(
                     title = { Text("Documents", fontWeight = FontWeight.SemiBold) },
                     actions = {
-                        IconButton(onClick = { createTagOpen = true }) {
-                            Icon(Icons.Default.NewLabel, contentDescription = "Create tag")
-                        }
+                        IconButton(onClick = { isSearching = true }) { Icon(Icons.Default.Search, "Search") }
+                        IconButton(onClick = { showCreateTag = true }) { Icon(Icons.Default.NewLabel, "Create tag") }
                         Box {
-                            IconButton(onClick = { sortMenuOpen = true }) {
-                                Icon(Icons.Default.Sort, contentDescription = "Sort")
-                            }
-                            DropdownMenu(
-                                expanded = sortMenuOpen,
-                                onDismissRequest = { sortMenuOpen = false }
-                            ) {
+                            IconButton(onClick = { showSortMenu = true }) { Icon(Icons.Default.Sort, "Sort") }
+                            DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
+                                Text("Sort by", style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.outline,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                                 DropdownMenuItem(
-                                    text = { Text("Date (newest first)") },
-                                    onClick = {
-                                        sortBy = "createdAt"; sortOrder = "desc"
-                                        sortMenuOpen = false; scope.launch { load(searchQuery) }
-                                    },
-                                    leadingIcon = if (sortBy == "createdAt" && sortOrder == "desc") {
-                                        { Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp)) }
-                                    } else null
+                                    text = { Text("Name") },
+                                    onClick = { sortField = SortField.NAME; showSortMenu = false },
+                                    leadingIcon = { if (sortField == SortField.NAME) Icon(Icons.Default.Check, null) }
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("Date (oldest first)") },
-                                    onClick = {
-                                        sortBy = "createdAt"; sortOrder = "asc"
-                                        sortMenuOpen = false; scope.launch { load(searchQuery) }
-                                    },
-                                    leadingIcon = if (sortBy == "createdAt" && sortOrder == "asc") {
-                                        { Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp)) }
-                                    } else null
+                                    text = { Text("Date") },
+                                    onClick = { sortField = SortField.DATE; showSortMenu = false },
+                                    leadingIcon = { if (sortField == SortField.DATE) Icon(Icons.Default.Check, null) }
+                                )
+                                HorizontalDivider()
+                                DropdownMenuItem(
+                                    text = { Text("Ascending") },
+                                    onClick = { sortOrder = SortOrder.ASC; showSortMenu = false },
+                                    leadingIcon = { if (sortOrder == SortOrder.ASC) Icon(Icons.Default.Check, null) }
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("Name (A-Z)") },
-                                    onClick = {
-                                        sortBy = "name"; sortOrder = "asc"
-                                        sortMenuOpen = false; scope.launch { load(searchQuery) }
-                                    },
-                                    leadingIcon = if (sortBy == "name" && sortOrder == "asc") {
-                                        { Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp)) }
-                                    } else null
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Name (Z-A)") },
-                                    onClick = {
-                                        sortBy = "name"; sortOrder = "desc"
-                                        sortMenuOpen = false; scope.launch { load(searchQuery) }
-                                    },
-                                    leadingIcon = if (sortBy == "name" && sortOrder == "desc") {
-                                        { Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp)) }
-                                    } else null
+                                    text = { Text("Descending") },
+                                    onClick = { sortOrder = SortOrder.DESC; showSortMenu = false },
+                                    leadingIcon = { if (sortOrder == SortOrder.DESC) Icon(Icons.Default.Check, null) }
                                 )
                             }
                         }
-                        IconButton(onClick = { isSearching = true }) {
-                            Icon(Icons.Default.Search, contentDescription = "Search")
-                        }
-                        IconButton(onClick = { scope.launch { load(searchQuery) } }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh")
-                        }
+                        IconButton(onClick = { scope.launch { load(searchQuery) } }) { Icon(Icons.Default.Refresh, "Refresh") }
                     }
                 )
             }
@@ -280,34 +287,108 @@ fun DocumentsScreen() {
             when {
                 !settings.isConfigured -> CenteredMessage("Configure your Papra instance in Settings")
                 errorMessage != null -> CenteredMessage(errorMessage ?: "Unknown error")
-                documents.isEmpty() && !isLoading -> CenteredMessage(
-                    if (searchQuery.isBlank()) "No documents yet. Upload something!"
-                    else "No results for \"${searchQuery}\""
+                sortedDocuments.isEmpty() && !isLoading -> CenteredMessage(
+                    if (searchQuery.isBlank()) "No documents yet. Upload something!" else "No results for \"$searchQuery\""
                 )
-                else -> {
-                    LazyColumn(
-                        contentPadding = PaddingValues(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        item {
-                            Text("${documents.size} document(s)",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline,
-                                modifier = Modifier.padding(bottom = 4.dp))
-                        }
-                        items(documents, key = { it.id }) { doc ->
-                            DocumentCard(
-                                doc = doc,
-                                settings = settings,
-                                api = api,
-                                onDelete = { deleteTarget = doc },
-                                onRename = { renameTarget = doc },
-                                onView = { viewTarget = doc },
-                                onManageTags = { tagManagerTarget = doc }
+                else -> LazyColumn(
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    item {
+                        Text("${sortedDocuments.size} document(s)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.padding(bottom = 4.dp))
+                    }
+                    items(sortedDocuments, key = { it.id }) { doc ->
+                        DocumentCard(
+                            doc = doc,
+                            isOpening = openingDocId == doc.id,
+                            onOpen = {
+                                scope.launch {
+                                    openingDocId = doc.id
+                                    val result = api.downloadDocumentToCache(
+                                        settings.baseUrl, settings.apiKey,
+                                        settings.organizationId, doc.id, doc.name
+                                    )
+                                    openingDocId = null
+                                    when (result) {
+                                        is ApiResult.Success -> {
+                                            val file = result.data
+                                            val mime = doc.mimeType.ifBlank {
+                                                MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension) ?: "*/*"
+                                            }
+                                            when {
+                                                mime == "application/pdf" ->
+                                                    onOpenPdf(file.absolutePath, doc.name)
+                                                mime.startsWith("image/") ->
+                                                    onOpenImage(file.absolutePath, doc.name)
+                                                else -> {
+                                                    // External app for everything else
+                                                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                                                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                                                        setDataAndType(uri, mime)
+                                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                    }
+                                                    context.startActivity(Intent.createChooser(intent, "Open with"))
+                                                }
+                                            }
+                                        }
+                                        else -> snackbarHostState.showSnackbar("Failed to open document")
+                                    }
+                                }
+                            },
+                            onTag = { tagTarget = doc },
+                            onRename = { renameTarget = doc; renameValue = doc.name },
+                            onDelete = { deleteTarget = doc }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+private fun TagManagerDialog(
+    document: PapraDocument,
+    availableTags: List<PapraTag>,
+    onDismiss: () -> Unit,
+    onAddTag: (String) -> Unit,
+    onRemoveTag: (String) -> Unit,
+    onCreateTag: () -> Unit
+) {
+    val currentTagIds = document.tags.map { it.id }.toSet()
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = RoundedCornerShape(16.dp), tonalElevation = 6.dp) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Manage tags", style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    IconButton(onClick = onCreateTag) { Icon(Icons.Default.Add, "Create tag") }
+                }
+                Text(document.name, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(16.dp))
+                if (availableTags.isEmpty()) {
+                    Text("No tags yet. Create one first.", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline)
+                } else {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        availableTags.forEach { tag ->
+                            val applied = tag.id in currentTagIds
+                            FilterChip(
+                                selected = applied,
+                                onClick = { if (applied) onRemoveTag(tag.id) else onAddTag(tag.id) },
+                                label = { Text(tag.name) },
+                                leadingIcon = if (applied) { { Icon(Icons.Default.Check, null, Modifier.size(16.dp)) } } else null
                             )
                         }
                     }
                 }
+                Spacer(Modifier.height(16.dp))
+                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) { Text("Done") }
             }
         }
     }
@@ -315,39 +396,21 @@ fun DocumentsScreen() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SearchBar(
-    query: String,
-    onQueryChange: (String) -> Unit,
-    onSearch: (String) -> Unit,
-    onClose: () -> Unit
-) {
+private fun SearchTopBar(query: String, onQueryChange: (String) -> Unit, onSearch: (String) -> Unit, onClose: () -> Unit) {
+    val keyboard = LocalSoftwareKeyboardController.current
     TopAppBar(
+        navigationIcon = { IconButton(onClick = onClose) { Icon(Icons.Default.ArrowBack, "Close search") } },
         title = {
             OutlinedTextField(
-                value = query,
-                onValueChange = onQueryChange,
-                placeholder = { Text("Search documents...") },
-                singleLine = true,
+                value = query, onValueChange = onQueryChange,
+                placeholder = { Text("Search documents...") }, singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
-                trailingIcon = {
-                    if (query.isNotBlank()) {
-                        IconButton(onClick = { onQueryChange("") }) {
-                            Icon(Icons.Default.Clear, contentDescription = "Clear")
-                        }
-                    }
-                }
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { onSearch(query); keyboard?.hide() }),
+                trailingIcon = { if (query.isNotBlank()) IconButton(onClick = { onQueryChange("") }) { Icon(Icons.Default.Clear, "Clear") } }
             )
         },
-        navigationIcon = {
-            IconButton(onClick = onClose) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Close search")
-            }
-        },
-        actions = {
-            IconButton(onClick = { onSearch(query) }) {
-                Icon(Icons.Default.Search, contentDescription = "Search")
-            }
-        }
+        actions = { IconButton(onClick = { onSearch(query); keyboard?.hide() }) { Icon(Icons.Default.Search, "Search") } }
     )
 }
 
@@ -355,125 +418,61 @@ private fun SearchBar(
 @Composable
 private fun DocumentCard(
     doc: PapraDocument,
-    settings: PapraSettings,
-    api: PapraApiClient,
-    onDelete: () -> Unit,
+    isOpening: Boolean,
+    onOpen: () -> Unit,
+    onTag: () -> Unit,
     onRename: () -> Unit,
-    onView: () -> Unit,
-    onManageTags: () -> Unit
+    onDelete: () -> Unit
 ) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var thumbnail by remember { mutableStateOf<Bitmap?>(null) }
-    var isImage by remember { mutableStateOf(false) }
-
-    LaunchedEffect(doc.id) {
-        if (doc.mimeType.startsWith("image/")) {
-            isImage = true
-            val result = api.downloadToCache(
-                settings.baseUrl, settings.apiKey,
-                settings.organizationId, doc.id, doc.name
-            )
-            if (result is ApiResult.Success) {
-                thumbnail = withContext(Dispatchers.IO) {
-                    try {
-                        android.graphics.BitmapFactory.decodeFile(result.data.absolutePath)
-                    } catch (e: Exception) { null }
-                }
-            }
-        }
-    }
+    var showMenu by remember { mutableStateOf(false) }
 
     Surface(
         shape = RoundedCornerShape(10.dp),
         tonalElevation = 1.dp,
-        modifier = Modifier.fillMaxWidth().clickable { onView() }
+        modifier = Modifier.fillMaxWidth().clickable(enabled = !isOpening, onClick = onOpen)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (isImage && thumbnail != null) {
-                    Image(
-                        bitmap = thumbnail!!.asImageBitmap(),
-                        contentDescription = null,
-                        modifier = Modifier.size(48.dp).clip(RoundedCornerShape(6.dp)),
-                        contentScale = ContentScale.Crop
-                    )
-                } else {
-                    val iconTint = when {
-                        doc.mimeType.contains("pdf") -> Color(0xFFE53935)
-                        doc.mimeType.startsWith("image/") -> Color(0xFF43A047)
-                        doc.mimeType.contains("video") -> Color(0xFF7E57C2)
-                        doc.mimeType.contains("audio") -> Color(0xFFFB8C00)
-                        else -> MaterialTheme.colorScheme.primary
-                    }
-                    Icon(
-                        imageVector = when {
-                            doc.mimeType.contains("pdf") -> Icons.Default.PictureAsPdf
-                            doc.mimeType.startsWith("image/") -> Icons.Default.Image
-                            doc.mimeType.contains("video") -> Icons.Default.VideoFile
-                            doc.mimeType.contains("audio") -> Icons.Default.AudioFile
-                            else -> Icons.Default.Description
-                        },
-                        contentDescription = null,
-                        tint = iconTint,
-                        modifier = Modifier.size(48.dp)
-                    )
+                Box(
+                    modifier = Modifier.size(40.dp).clip(RoundedCornerShape(8.dp))
+                        .background(fileTypeColor(doc.mimeType).copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isOpening) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    else Icon(fileTypeIcon(doc.mimeType), null, tint = fileTypeColor(doc.mimeType), modifier = Modifier.size(22.dp))
                 }
-
                 Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(doc.name,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(formatDate(doc.createdAt),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline)
-                        Spacer(Modifier.width(8.dp))
-                        Text(formatSize(doc.size),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outlineVariant)
+                    Text(doc.name, style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (doc.createdAt.isNotBlank())
+                            Text(formatDate(doc.createdAt), style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline)
+                        if (doc.size > 0)
+                            Text(formatSize(doc.size), style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline)
                     }
                 }
-
-                var menuOpen by remember { mutableStateOf(false) }
                 Box {
-                    IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "More", modifier = Modifier.size(18.dp))
+                    IconButton(onClick = { showMenu = true }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.MoreVert, "More", modifier = Modifier.size(18.dp))
                     }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        DropdownMenuItem(
-                            text = { Text("View") },
-                            onClick = { menuOpen = false; onView() },
-                            leadingIcon = { Icon(Icons.Default.Visibility, null) }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Rename") },
-                            onClick = { menuOpen = false; onRename() },
-                            leadingIcon = { Icon(Icons.Default.Edit, null) }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Tags") },
-                            onClick = { menuOpen = false; onManageTags() },
-                            leadingIcon = { Icon(Icons.Default.Label, null) }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Delete") },
-                            onClick = { menuOpen = false; onDelete() },
-                            leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) }
-                        )
+                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                        DropdownMenuItem(text = { Text("Manage tags") }, onClick = { showMenu = false; onTag() },
+                            leadingIcon = { Icon(Icons.Default.Label, null) })
+                        DropdownMenuItem(text = { Text("Rename") }, onClick = { showMenu = false; onRename() },
+                            leadingIcon = { Icon(Icons.Default.Edit, null) })
+                        DropdownMenuItem(text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                            onClick = { showMenu = false; onDelete() },
+                            leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) })
                     }
                 }
             }
-
             if (doc.tags.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    doc.tags.forEach { tag ->
-                        TagChip(tag)
-                    }
+                    doc.tags.forEach { tag -> TagChip(tag) }
                 }
             }
         }
@@ -483,320 +482,50 @@ private fun DocumentCard(
 @Composable
 private fun TagChip(tag: PapraTag) {
     val parsedColor = remember(tag.color) {
-        if (tag.color.isNotBlank()) {
-            try { android.graphics.Color.parseColor(tag.color) } catch (e: Exception) { null }
-        } else null
+        if (tag.color.isNotBlank()) try { android.graphics.Color.parseColor(tag.color) } catch (e: Exception) { null } else null
     }
     val color = if (parsedColor != null) Color(parsedColor) else MaterialTheme.colorScheme.secondaryContainer
-
-    Surface(
-        color = color.copy(alpha = 0.2f),
-        shape = RoundedCornerShape(4.dp)
-    ) {
-        Text(
-            tag.name,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurface
-        )
+    Surface(color = color.copy(alpha = 0.2f), shape = RoundedCornerShape(4.dp)) {
+        Text(tag.name, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface)
     }
 }
 
 @Composable
 private fun CenteredMessage(text: String) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text(text, color = MaterialTheme.colorScheme.outline,
-            style = MaterialTheme.typography.bodyMedium)
+        Text(text, color = MaterialTheme.colorScheme.outline, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
-private fun formatDate(iso: String): String {
-    return try {
-        val instant = Instant.parse(iso)
-        val formatter = DateTimeFormatter.ofPattern("d MMM yyyy")
-            .withZone(ZoneId.systemDefault())
-        formatter.format(instant)
-    } catch (e: Exception) { iso }
+private fun fileTypeIcon(mime: String): ImageVector = when {
+    mime.startsWith("image/") -> Icons.Default.Image
+    mime == "application/pdf" -> Icons.Default.PictureAsPdf
+    mime.startsWith("video/") -> Icons.Default.VideoFile
+    mime.startsWith("audio/") -> Icons.Default.AudioFile
+    mime.contains("spreadsheet") || mime.contains("excel") -> Icons.Default.TableChart
+    mime.contains("presentation") || mime.contains("powerpoint") -> Icons.Default.Slideshow
+    mime.contains("word") || mime.contains("document") -> Icons.Default.Article
+    mime.startsWith("text/") -> Icons.Default.TextSnippet
+    else -> Icons.Default.Description
 }
+
+private fun fileTypeColor(mime: String): Color = when {
+    mime.startsWith("image/") -> Color(0xFF10B981)
+    mime == "application/pdf" -> Color(0xFFEF4444)
+    mime.startsWith("video/") -> Color(0xFF8B5CF6)
+    mime.startsWith("audio/") -> Color(0xFFF59E0B)
+    mime.contains("spreadsheet") || mime.contains("excel") -> Color(0xFF22C55E)
+    mime.contains("presentation") || mime.contains("powerpoint") -> Color(0xFFF97316)
+    mime.contains("word") || mime.contains("document") -> Color(0xFF3B82F6)
+    else -> Color(0xFF6B7280)
+}
+
+private fun formatDate(iso: String): String = try {
+    DateTimeFormatter.ofPattern("d MMM yyyy").withZone(ZoneId.systemDefault()).format(Instant.parse(iso))
+} catch (e: Exception) { iso }
 
 private fun formatSize(bytes: Long): String {
-    if (bytes <= 0) return "unknown"
-    val kb = bytes / 1024.0
-    val mb = kb / 1024.0
-    return when {
-        mb >= 1 -> "%.1f MB".format(mb)
-        kb >= 1 -> "%.0f KB".format(kb)
-        else -> "$bytes B"
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun DocumentViewerDialog(
-    document: PapraDocument,
-    settings: PapraSettings,
-    api: PapraApiClient,
-    onDismiss: () -> Unit
-) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var isLoading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var pdfBitmaps by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
-    var cachedFile by remember { mutableStateOf<File?>(null) }
-
-    LaunchedEffect(document.id) {
-        val result = api.downloadToCache(
-            settings.baseUrl, settings.apiKey,
-            settings.organizationId, document.id, document.name
-        )
-        when (result) {
-            is ApiResult.Success -> {
-                cachedFile = result.data
-                if (document.mimeType.contains("pdf")) {
-                    pdfBitmaps = withContext(Dispatchers.IO) { renderPdfToBitmaps(result.data) }
-                    isLoading = false
-                } else if (document.mimeType.startsWith("image/")) {
-                    isLoading = false
-                } else {
-                    openExternal(context, result.data, document.mimeType)
-                    onDismiss()
-                }
-            }
-            is ApiResult.Error -> { error = result.message; isLoading = false }
-            is ApiResult.NetworkError -> { error = result.message; isLoading = false }
-        }
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        modifier = Modifier.fillMaxWidth(),
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(document.name, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Default.Close, null)
-                }
-            }
-        },
-        text = {
-            Box(modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp, max = 500.dp)) {
-                when {
-                    isLoading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-                    error != null -> Text(error!!, modifier = Modifier.align(Alignment.Center))
-                    document.mimeType.contains("pdf") -> {
-                        LazyColumn {
-                            items(pdfBitmaps) { bitmap ->
-                                Image(
-                                    bitmap = bitmap.asImageBitmap(),
-                                    contentDescription = null,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    contentScale = ContentScale.Fit
-                                )
-                                Spacer(Modifier.height(8.dp))
-                            }
-                        }
-                    }
-                    document.mimeType.startsWith("image/") -> {
-                        cachedFile?.let { file ->
-                            val bitmap = remember(file) {
-                                android.graphics.BitmapFactory.decodeFile(file.absolutePath)
-                            }
-                            bitmap?.let {
-                                Image(
-                                    bitmap = it.asImageBitmap(),
-                                    contentDescription = null,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    contentScale = ContentScale.Fit
-                                )
-                            }
-                        }
-                    }
-                    else -> Text("Unsupported file type for preview")
-                }
-            }
-        },
-        confirmButton = {
-            cachedFile?.let { file ->
-                TextButton(onClick = { openExternal(context, file, document.mimeType) }) {
-                    Text("Open externally")
-                }
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
-        }
-    )
-}
-
-private fun renderPdfToBitmaps(file: File): List<Bitmap> {
-    val bitmaps = mutableListOf<Bitmap>()
-    try {
-        val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-        PdfRenderer(fd).use { renderer ->
-            val displayMetrics = android.content.res.Resources.getSystem().displayMetrics
-            val screenWidth = displayMetrics.widthPixels
-            for (i in 0 until renderer.pageCount) {
-                renderer.openPage(i).use { page ->
-                    val scale = screenWidth.toFloat() / page.width
-                    val height = (page.height * scale).toInt()
-                    val bitmap = Bitmap.createBitmap(screenWidth, height, Bitmap.Config.ARGB_8888)
-                    page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                    bitmaps.add(bitmap)
-                }
-            }
-        }
-    } catch (e: Exception) { e.printStackTrace() }
-    return bitmaps
-}
-
-private fun openExternal(context: android.content.Context, file: File, mimeType: String) {
-    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-    val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, mimeType)
-        flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
-    }
-    context.startActivity(Intent.createChooser(intent, "Open with"))
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun TagManagerDialog(
-    document: PapraDocument,
-    settings: PapraSettings,
-    api: PapraApiClient,
-    onDismiss: () -> Unit,
-    onUpdated: () -> Unit
-) {
-    val scope = rememberCoroutineScope()
-    var allTags by remember { mutableStateOf<List<PapraTag>>(emptyList()) }
-    var currentTagIds by remember { mutableStateOf(document.tags.map { it.id }.toSet()) }
-    var isLoading by remember { mutableStateOf(true) }
-
-    LaunchedEffect(Unit) {
-        val result = api.listTags(settings.baseUrl, settings.apiKey, settings.organizationId)
-        if (result is ApiResult.Success) allTags = result.data
-        isLoading = false
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Manage tags") },
-        text = {
-            if (isLoading) {
-                Box(Modifier.fillMaxWidth().height(60.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                }
-            } else {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    allTags.forEach { tag ->
-                        val selected = tag.id in currentTagIds
-                        FilterChip(
-                            selected = selected,
-                            onClick = {
-                                scope.launch {
-                                    if (selected) {
-                                        api.removeTagFromDocument(
-                                            settings.baseUrl, settings.apiKey,
-                                            settings.organizationId, document.id, tag.id
-                                        )
-                                        currentTagIds = currentTagIds - tag.id
-                                    } else {
-                                        api.addTagToDocument(
-                                            settings.baseUrl, settings.apiKey,
-                                            settings.organizationId, document.id, tag.id
-                                        )
-                                        currentTagIds = currentTagIds + tag.id
-                                    }
-                                    onUpdated()
-                                }
-                            },
-                            label = { Text(tag.name) },
-                            leadingIcon = if (selected) {
-                                { Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp)) }
-                            } else null
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(onClick = onDismiss) { Text("Done") }
-        }
-    )
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun CreateTagDialog(
-    settings: PapraSettings,
-    api: PapraApiClient,
-    onDismiss: () -> Unit,
-    onCreated: () -> Unit
-) {
-    val scope = rememberCoroutineScope()
-    var name by remember { mutableStateOf("") }
-    var color by remember { mutableStateOf("#2563EB") }
-    val presetColors = listOf(
-        "#2563EB", "#DC2626", "#16A34A", "#CA8A04", "#9333EA",
-        "#DB2777", "#0891B2", "#EA580C", "#4B5563", "#000000"
-    )
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Create new tag") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("Tag name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Text("Color", style = MaterialTheme.typography.labelSmall)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    presetColors.forEach { c ->
-                        val selected = c == color
-                        val parsed = remember(c) {
-                            try { android.graphics.Color.parseColor(c) } catch (e: Exception) { android.graphics.Color.BLUE }
-                        }
-                        Surface(
-                            color = Color(parsed),
-                            shape = RoundedCornerShape(20.dp),
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clickable { color = c }
-                                .then(if (selected) Modifier.padding(2.dp) else Modifier),
-                            border = if (selected) {
-                                BorderStroke(2.dp, MaterialTheme.colorScheme.onSurface)
-                            } else null
-                        ) {
-                            if (selected) {
-                                Icon(Icons.Default.Check, null, tint = Color.White,
-                                    modifier = Modifier.padding(6.dp))
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    if (name.isNotBlank()) {
-                        scope.launch {
-                            api.createTag(settings.baseUrl, settings.apiKey, settings.organizationId, name, color)
-                            onCreated()
-                            onDismiss()
-                        }
-                    }
-                },
-                enabled = name.isNotBlank()
-            ) { Text("Create") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
-    )
+    val kb = bytes / 1024.0; val mb = kb / 1024.0
+    return when { mb >= 1 -> "%.1f MB".format(mb); kb >= 1 -> "%.0f KB".format(kb); else -> "$bytes B" }
 }

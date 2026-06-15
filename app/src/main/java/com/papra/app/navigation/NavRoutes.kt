@@ -15,3 +15,14 @@ sealed class Screen(val route: String, val label: String, val icon: ImageVector)
         val bottomNavItems = listOf(Upload, Documents, Settings)
     }
 }
+
+sealed class ViewerScreen(val route: String) {
+    object Pdf : ViewerScreen("pdf_viewer/{filePath}/{documentName}") {
+        fun createRoute(filePath: String, documentName: String) =
+            "pdf_viewer/${java.net.URLEncoder.encode(filePath, "UTF-8")}/${java.net.URLEncoder.encode(documentName, "UTF-8")}"
+    }
+    object Image : ViewerScreen("image_viewer/{filePath}/{documentName}") {
+        fun createRoute(filePath: String, documentName: String) =
+            "image_viewer/${java.net.URLEncoder.encode(filePath, "UTF-8")}/${java.net.URLEncoder.encode(documentName, "UTF-8")}"
+    }
+}
