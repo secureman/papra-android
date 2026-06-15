@@ -49,17 +49,25 @@ fun PdfViewerScreen(
                 val file = File(filePath)
                 val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
                 val renderer = PdfRenderer(pfd)
+
+                if (renderer.pageCount == 0) {
+                    renderer.close()
+                    pfd.close()
+                    errorMessage = "PDF has no pages or could not be read"
+                    isLoading = false
+                    return@withContext
+                }
+
                 pageCount = renderer.pageCount
                 val bitmaps = mutableListOf<Bitmap>()
                 val screenWidth = context.resources.displayMetrics.widthPixels
 
                 for (i in 0 until renderer.pageCount) {
                     val page = renderer.openPage(i)
-                    val scale = screenWidth.toFloat() / page.width
+                    val scale = screenWidth.toFloat() / page.width.coerceAtLeast(1)
                     val bitmapWidth = screenWidth
-                    val bitmapHeight = (page.height * scale).toInt()
+                    val bitmapHeight = (page.height * scale).toInt().coerceAtLeast(1)
                     val bitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888)
-                    // Fill white background
                     bitmap.eraseColor(android.graphics.Color.WHITE)
                     page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                     page.close()
@@ -67,9 +75,16 @@ fun PdfViewerScreen(
                 }
                 renderer.close()
                 pfd.close()
-                pages = bitmaps
+
+                if (bitmaps.isEmpty()) {
+                    errorMessage = "Could not render any pages"
+                } else {
+                    pages = bitmaps
+                }
+            } catch (e: SecurityException) {
+                errorMessage = "PDF is password protected"
             } catch (e: Exception) {
-                errorMessage = "Failed to render PDF: ${e.message}"
+                errorMessage = "Cannot render this PDF: ${e.message}"
             } finally {
                 isLoading = false
             }
@@ -124,8 +139,29 @@ fun PdfViewerScreen(
                     }
                 }
                 errorMessage != null -> {
-                    Text(errorMessage ?: "Error", color = Color.White,
-                        modifier = Modifier.align(Alignment.Center))
+                    Column(
+                        modifier = Modifier.align(Alignment.Center).padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Text(errorMessage ?: "Error", color = Color.White,
+                            style = MaterialTheme.typography.bodyMedium)
+                        OutlinedButton(
+                            onClick = {
+                                val file = java.io.File(filePath)
+                                val uri = androidx.core.content.FileProvider.getUriForFile(
+                                    context, "${context.packageName}.fileprovider", file
+                                )
+                                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                                    setDataAndType(uri, "application/pdf")
+                                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(android.content.Intent.createChooser(intent, "Open with"))
+                            }
+                        ) {
+                            Text("Open with external app", color = Color.White)
+                        }
+                    }
                 }
                 pages.isEmpty() -> {
                     Text("No pages found", color = Color.White,
