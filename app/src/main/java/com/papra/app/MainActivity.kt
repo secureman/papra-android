@@ -1,5 +1,9 @@
 package com.papra.app
 
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.papra.app.ui.screens.UploadViewModelFactory
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -55,9 +59,14 @@ class MainActivity : ComponentActivity() {
 fun PapraApp(initialSharedUris: List<Uri> = emptyList()) {
     val context = LocalContext.current
     val navController = rememberNavController()
+    val context = LocalContext.current
+
+    val settings = remember { SettingsRepository(context) }
+    val api = remember { PapraApi() }
+
     val uploadViewModel: UploadViewModel = viewModel(
-        factory = ViewModelProvider.AndroidViewModelFactory(context.applicationContext as android.app.Application)
-    )
+        factory = UploadViewModelFactory(api, settings)
+)
 
     // If files were shared into the app, add them and navigate to Upload tab
     LaunchedEffect(initialSharedUris) {
