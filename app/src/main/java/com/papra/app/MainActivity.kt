@@ -1,9 +1,5 @@
 package com.papra.app
 
-import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalContext
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.papra.app.ui.screens.UploadViewModelFactory
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -34,11 +30,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Collect any URIs shared into the app via ACTION_SEND / ACTION_SEND_MULTIPLE
         val sharedUris = mutableListOf<Uri>()
         when (intent?.action) {
             Intent.ACTION_SEND -> {
-                (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { sharedUris.add(it) }
+                (intent.getParcelableExtra(Intent.EXTRA_STREAM))?.let { sharedUris.add(it) }
             }
             Intent.ACTION_SEND_MULTIPLE -> {
                 intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.let {
@@ -59,16 +54,13 @@ class MainActivity : ComponentActivity() {
 fun PapraApp(initialSharedUris: List<Uri> = emptyList()) {
     val context = LocalContext.current
     val navController = rememberNavController()
-    val context = LocalContext.current
-
-    val settings = remember { SettingsRepository(context) }
-    val api = remember { PapraApi() }
 
     val uploadViewModel: UploadViewModel = viewModel(
-        factory = UploadViewModelFactory(api, settings)
-)
+        factory = ViewModelProvider.AndroidViewModelFactory.getInstance(
+            context.applicationContext as android.app.Application
+        )
+    )
 
-    // If files were shared into the app, add them and navigate to Upload tab
     LaunchedEffect(initialSharedUris) {
         if (initialSharedUris.isNotEmpty()) {
             uploadViewModel.addFiles(initialSharedUris)
