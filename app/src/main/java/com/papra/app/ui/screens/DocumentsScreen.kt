@@ -318,7 +318,8 @@ fun DocumentsScreen(
 					val ext = doc.name.substringAfterLast('.', "").lowercase()
 					val mime = doc.mimeType.ifBlank {
     						MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
-						}                                            
+						}
+                                                android.util.Log.d("PapraDebug", "name=${doc.name} ext=$ext mime=$mime docMime=${doc.mimeType} file=${file.absolutePath} fileExists=${file.exists()} fileSize=${file.length()}") 
                                             when {
                                                 mime == "application/pdf" ->
                                                     onOpenPdf(file.absolutePath, doc.name)
