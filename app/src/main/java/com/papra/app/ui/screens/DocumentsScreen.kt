@@ -315,9 +315,10 @@ fun DocumentsScreen(
                                     when (result) {
                                         is ApiResult.Success -> {
                                             val file = result.data
-                                            val mime = doc.mimeType.ifBlank {
-                                                MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension) ?: "*/*"
-                                            }
+					val ext = doc.name.substringAfterLast('.', "").lowercase()
+					val mime = doc.mimeType.ifBlank {
+    						MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
+						}                                            
                                             when {
                                                 mime == "application/pdf" ->
                                                     onOpenPdf(file.absolutePath, doc.name)
