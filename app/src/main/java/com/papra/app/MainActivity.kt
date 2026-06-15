@@ -33,7 +33,7 @@ class MainActivity : ComponentActivity() {
         val sharedUris = mutableListOf<Uri>()
         when (intent?.action) {
             Intent.ACTION_SEND -> {
-                (intent.getParcelableExtra(Intent.EXTRA_STREAM))?.let { sharedUris.add(it) }
+                intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)?.let { sharedUris.add(it) }
             }
             Intent.ACTION_SEND_MULTIPLE -> {
                 intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.let {
