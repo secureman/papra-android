@@ -3,6 +3,8 @@ package com.papra.app.ui.screens
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -14,10 +16,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import com.papra.app.data.api.PapraTag
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -41,7 +45,6 @@ fun UploadScreen(
         }
     }
 
-    // Tag picker dialog
     if (state.tagPickerDocumentId != null) {
         TagPickerDialog(
             documentName = state.tagPickerDocumentName ?: "",
@@ -55,7 +58,6 @@ fun UploadScreen(
         )
     }
 
-    // Create tag dialog (shared between upload and tag picker)
     if (state.isCreatingTag) {
         CreateTagDialog(
             onDismiss = { viewModel.dismissCreateTag() },
@@ -84,7 +86,6 @@ fun UploadScreen(
                 .padding(padding)
                 .padding(horizontal = 16.dp)
         ) {
-            // Offline banner
             if (state.isOffline) {
                 Surface(
                     color = MaterialTheme.colorScheme.errorContainer,
@@ -282,19 +283,22 @@ private fun CreateTagDialog(
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     presetColors.forEach { c ->
                         val selected = c == color
+                        val parsed = remember(c) {
+                            try { android.graphics.Color.parseColor(c) } catch (e: Exception) { android.graphics.Color.BLUE }
+                        }
                         Surface(
-                            color = androidx.compose.ui.graphics.Color(android.graphics.Color.parseColor(c)),
+                            color = Color(parsed),
                             shape = RoundedCornerShape(20.dp),
                             modifier = Modifier
                                 .size(36.dp)
                                 .clickable { color = c }
                                 .then(if (selected) Modifier.padding(2.dp) else Modifier),
                             border = if (selected) {
-                                androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.onSurface)
+                                BorderStroke(2.dp, MaterialTheme.colorScheme.onSurface)
                             } else null
                         ) {
                             if (selected) {
-                                Icon(Icons.Default.Check, null, tint = androidx.compose.ui.graphics.Color.White,
+                                Icon(Icons.Default.Check, null, tint = Color.White,
                                     modifier = Modifier.padding(6.dp))
                             }
                         }

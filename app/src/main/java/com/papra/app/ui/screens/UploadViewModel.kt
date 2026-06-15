@@ -33,15 +33,12 @@ data class UploadScreenState(
     val isUploading: Boolean = false,
     val snackbarMessage: String? = null,
     val settings: PapraSettings = PapraSettings(),
-    // Tag picker state
     val tagPickerDocumentId: String? = null,
     val tagPickerDocumentName: String? = null,
     val availableTags: List<PapraTag> = emptyList(),
     val selectedTagIds: Set<String> = emptySet(),
     val isLoadingTags: Boolean = false,
-    // Create tag
     val isCreatingTag: Boolean = false,
-    // Offline
     val isOffline: Boolean = false
 )
 
@@ -86,7 +83,6 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
             _state.update { it.copy(snackbarMessage = "Please configure settings first") }
             return
         }
-
         val pendingFiles = _state.value.files.filter {
             it.status == UploadStatus.PENDING || it.status == UploadStatus.FAILED
         }
@@ -94,18 +90,13 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
 
         viewModelScope.launch {
             _state.update { it.copy(isUploading = true, isOffline = false) }
-
             for (item in pendingFiles) {
                 setFileStatus(item.uri, UploadStatus.UPLOADING)
-
                 val result = api.uploadDocument(
-                    baseUrl = settings.baseUrl,
-                    apiKey = settings.apiKey,
-                    organizationId = settings.organizationId,
-                    uri = item.uri,
+                    baseUrl = settings.baseUrl, apiKey = settings.apiKey,
+                    organizationId = settings.organizationId, uri = item.uri,
                     onProgress = { progress -> updateFileProgress(item.uri, progress) }
                 )
-
                 when (result) {
                     is ApiResult.Success -> {
                         setFileDone(item.uri, result.data)
@@ -120,10 +111,8 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
             }
-
             val doneCount = _state.value.files.count { it.status == UploadStatus.DONE }
             val failCount = _state.value.files.count { it.status == UploadStatus.FAILED }
-
             _state.update {
                 it.copy(
                     isUploading = false,
@@ -139,17 +128,13 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
 
     fun retryFile(uri: Uri) {
         _state.update {
-            it.copy(
-                files = it.files.map { f ->
-                    if (f.uri == uri) f.copy(status = UploadStatus.PENDING, progress = 0, errorMessage = null)
-                    else f
-                }
-            )
+            it.copy(files = it.files.map { f ->
+                if (f.uri == uri) f.copy(status = UploadStatus.PENDING, progress = 0, errorMessage = null)
+                else f
+            })
         }
         uploadAll()
     }
-
-    // ── Tag picker ────────────────────────────────────────────────────────────
 
     private suspend fun openTagPicker(documentId: String, documentName: String, settings: PapraSettings) {
         _state.update { it.copy(isLoadingTags = true) }
@@ -178,7 +163,6 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
         val docId = s.tagPickerDocumentId ?: return
         val settings = s.settings
         val selectedIds = s.selectedTagIds.toList()
-
         viewModelScope.launch {
             selectedIds.forEach { tagId ->
                 api.addTagToDocument(settings.baseUrl, settings.apiKey, settings.organizationId, docId, tagId)
@@ -205,8 +189,6 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    // ── Create tag ────────────────────────────────────────────────────────────
-
     fun showCreateTag() {
         _state.update { it.copy(isCreatingTag = true) }
     }
@@ -232,36 +214,20 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
         _state.update { it.copy(snackbarMessage = null) }
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
     private fun setFileStatus(uri: Uri, status: UploadStatus) {
-        _state.update {
-            it.copy(files = it.files.map { f -> if (f.uri == uri) f.copy(status = status) else f })
-        }
+        _state.update { it.copy(files = it.files.map { f -> if (f.uri == uri) f.copy(status = status) else f }) }
     }
 
     private fun setFileDone(uri: Uri, documentId: String) {
-        _state.update {
-            it.copy(files = it.files.map { f ->
-                if (f.uri == uri) f.copy(status = UploadStatus.DONE, documentId = documentId) else f
-            })
-        }
+        _state.update { it.copy(files = it.files.map { f -> if (f.uri == uri) f.copy(status = UploadStatus.DONE, documentId = documentId) else f }) }
     }
 
     private fun updateFileProgress(uri: Uri, progress: Int) {
-        _state.update {
-            it.copy(files = it.files.map { f -> if (f.uri == uri) f.copy(progress = progress) else f })
-        }
+        _state.update { it.copy(files = it.files.map { f -> if (f.uri == uri) f.copy(progress = progress) else f }) }
     }
 
     private fun setFileError(uri: Uri, message: String) {
-        _state.update {
-            it.copy(
-                files = it.files.map { f ->
-                    if (f.uri == uri) f.copy(status = UploadStatus.FAILED, errorMessage = message) else f
-                }
-            )
-        }
+        _state.update { it.copy(files = it.files.map { f -> if (f.uri == uri) f.copy(status = UploadStatus.FAILED, errorMessage = message) else f }) }
     }
 
     private fun resolveFileName(uri: Uri): String {

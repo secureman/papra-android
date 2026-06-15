@@ -62,7 +62,6 @@ fun DocumentsScreen() {
     var viewTarget by remember { mutableStateOf<PapraDocument?>(null) }
     var tagManagerTarget by remember { mutableStateOf<PapraDocument?>(null) }
     var createTagOpen by remember { mutableStateOf(false) }
-
     var sortBy by remember { mutableStateOf("createdAt") }
     var sortOrder by remember { mutableStateOf("desc") }
     var sortMenuOpen by remember { mutableStateOf(false) }
@@ -86,7 +85,6 @@ fun DocumentsScreen() {
 
     LaunchedEffect(Unit) { load() }
 
-    // View document dialog / screen
     viewTarget?.let { doc ->
         DocumentViewerDialog(
             document = doc,
@@ -96,7 +94,6 @@ fun DocumentsScreen() {
         )
     }
 
-    // Tag manager dialog
     tagManagerTarget?.let { doc ->
         TagManagerDialog(
             document = doc,
@@ -107,7 +104,6 @@ fun DocumentsScreen() {
         )
     }
 
-    // Create tag dialog
     if (createTagOpen) {
         CreateTagDialog(
             settings = settings,
@@ -117,7 +113,6 @@ fun DocumentsScreen() {
         )
     }
 
-    // Rename dialog
     renameTarget?.let { doc ->
         var newName by remember { mutableStateOf(doc.name) }
         AlertDialog(
@@ -143,9 +138,7 @@ fun DocumentsScreen() {
                             )
                             when (result) {
                                 is ApiResult.Success -> {
-                                    documents = documents.map {
-                                        if (it.id == doc.id) it.copy(name = newName) else it
-                                    }
+                                    documents = documents.map { if (it.id == doc.id) it.copy(name = newName) else it }
                                     snackbarHostState.showSnackbar("Renamed successfully")
                                 }
                                 else -> snackbarHostState.showSnackbar("Rename failed")
@@ -160,7 +153,6 @@ fun DocumentsScreen() {
         )
     }
 
-    // Delete confirmation
     deleteTarget?.let { doc ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
@@ -289,7 +281,7 @@ fun DocumentsScreen() {
                 errorMessage != null -> CenteredMessage(errorMessage ?: "Unknown error")
                 documents.isEmpty() && !isLoading -> CenteredMessage(
                     if (searchQuery.isBlank()) "No documents yet. Upload something!"
-                    else "No results for \"$searchQuery\""
+                    else "No results for \"${searchQuery}\""
                 )
                 else -> {
                     LazyColumn(
@@ -358,6 +350,7 @@ private fun SearchBar(
     )
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DocumentCard(
     doc: PapraDocument,
@@ -397,14 +390,11 @@ private fun DocumentCard(
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Thumbnail or icon
                 if (isImage && thumbnail != null) {
                     Image(
                         bitmap = thumbnail!!.asImageBitmap(),
                         contentDescription = null,
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(RoundedCornerShape(6.dp)),
+                        modifier = Modifier.size(48.dp).clip(RoundedCornerShape(6.dp)),
                         contentScale = ContentScale.Crop
                     )
                 } else {
@@ -447,7 +437,6 @@ private fun DocumentCard(
                     }
                 }
 
-                // Actions
                 var menuOpen by remember { mutableStateOf(false) }
                 Box {
                     IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(32.dp)) {
@@ -478,7 +467,6 @@ private fun DocumentCard(
                 }
             }
 
-            // Tags
             if (doc.tags.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -527,9 +515,7 @@ private fun formatDate(iso: String): String {
         val formatter = DateTimeFormatter.ofPattern("d MMM yyyy")
             .withZone(ZoneId.systemDefault())
         formatter.format(instant)
-    } catch (e: Exception) {
-        iso
-    }
+    } catch (e: Exception) { iso }
 }
 
 private fun formatSize(bytes: Long): String {
@@ -543,8 +529,7 @@ private fun formatSize(bytes: Long): String {
     }
 }
 
-// ── Document Viewer Dialog ────────────────────────────────────────────────
-
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DocumentViewerDialog(
     document: PapraDocument,
@@ -568,14 +553,11 @@ private fun DocumentViewerDialog(
             is ApiResult.Success -> {
                 cachedFile = result.data
                 if (document.mimeType.contains("pdf")) {
-                    pdfBitmaps = withContext(Dispatchers.IO) {
-                        renderPdfToBitmaps(result.data)
-                    }
+                    pdfBitmaps = withContext(Dispatchers.IO) { renderPdfToBitmaps(result.data) }
                     isLoading = false
                 } else if (document.mimeType.startsWith("image/")) {
                     isLoading = false
                 } else {
-                    // Open externally for other types
                     openExternal(context, result.data, document.mimeType)
                     onDismiss()
                 }
@@ -635,9 +617,7 @@ private fun DocumentViewerDialog(
         },
         confirmButton = {
             cachedFile?.let { file ->
-                TextButton(onClick = {
-                    openExternal(context, file, document.mimeType)
-                }) {
+                TextButton(onClick = { openExternal(context, file, document.mimeType) }) {
                     Text("Open externally")
                 }
             }
@@ -665,9 +645,7 @@ private fun renderPdfToBitmaps(file: File): List<Bitmap> {
                 }
             }
         }
-    } catch (e: Exception) {
-        e.printStackTrace()
-    }
+    } catch (e: Exception) { e.printStackTrace() }
     return bitmaps
 }
 
@@ -680,8 +658,7 @@ private fun openExternal(context: android.content.Context, file: File, mimeType:
     context.startActivity(Intent.createChooser(intent, "Open with"))
 }
 
-// ── Tag Manager Dialog ───────────────────────────────────────────────────
-
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TagManagerDialog(
     document: PapraDocument,
@@ -748,8 +725,7 @@ private fun TagManagerDialog(
     )
 }
 
-// ── Create Tag Dialog ──────────────────────────────────────────────────────
-
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CreateTagDialog(
     settings: PapraSettings,
@@ -781,15 +757,18 @@ private fun CreateTagDialog(
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     presetColors.forEach { c ->
                         val selected = c == color
+                        val parsed = remember(c) {
+                            try { android.graphics.Color.parseColor(c) } catch (e: Exception) { android.graphics.Color.BLUE }
+                        }
                         Surface(
-                            color = Color(android.graphics.Color.parseColor(c)),
+                            color = Color(parsed),
                             shape = RoundedCornerShape(20.dp),
                             modifier = Modifier
                                 .size(36.dp)
                                 .clickable { color = c }
                                 .then(if (selected) Modifier.padding(2.dp) else Modifier),
                             border = if (selected) {
-                                androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.onSurface)
+                                BorderStroke(2.dp, MaterialTheme.colorScheme.onSurface)
                             } else null
                         ) {
                             if (selected) {
