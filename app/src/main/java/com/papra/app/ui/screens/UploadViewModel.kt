@@ -39,6 +39,8 @@ data class UploadScreenState(
     val availableTags: List<PapraTag> = emptyList(),
     val selectedTagIds: Set<String> = emptySet(),
     val isLoadingTags: Boolean = false,
+    // Create tag
+    val isCreatingTag: Boolean = false,
     // Offline
     val isOffline: Boolean = false
 )
@@ -107,7 +109,6 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
                 when (result) {
                     is ApiResult.Success -> {
                         setFileDone(item.uri, result.data)
-                        // After last file uploads, open tag picker for first uploaded doc
                         if (item == pendingFiles.last() && result.data.isNotBlank()) {
                             openTagPicker(result.data, item.name, settings)
                         }
@@ -127,7 +128,7 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
                 it.copy(
                     isUploading = false,
                     snackbarMessage = when {
-                        failCount == 0 -> null // tag picker will show instead
+                        failCount == 0 -> null
                         doneCount == 0 -> "All uploads failed"
                         else -> "$doneCount uploaded, $failCount failed"
                     }
@@ -201,6 +202,29 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
                 selectedTagIds = emptySet(),
                 snackbarMessage = "Uploaded successfully"
             )
+        }
+    }
+
+    // ── Create tag ────────────────────────────────────────────────────────────
+
+    fun showCreateTag() {
+        _state.update { it.copy(isCreatingTag = true) }
+    }
+
+    fun dismissCreateTag() {
+        _state.update { it.copy(isCreatingTag = false) }
+    }
+
+    fun createTag(name: String, color: String) {
+        val settings = _state.value.settings
+        viewModelScope.launch {
+            api.createTag(settings.baseUrl, settings.apiKey, settings.organizationId, name, color)
+            val result = api.listTags(settings.baseUrl, settings.apiKey, settings.organizationId)
+            if (result is ApiResult.Success) {
+                _state.update { it.copy(availableTags = result.data, isCreatingTag = false) }
+            } else {
+                _state.update { it.copy(isCreatingTag = false) }
+            }
         }
     }
 

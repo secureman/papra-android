@@ -50,7 +50,16 @@ fun UploadScreen(
             isLoading = state.isLoadingTags,
             onToggleTag = { viewModel.toggleTag(it) },
             onConfirm = { viewModel.confirmTags() },
-            onDismiss = { viewModel.dismissTagPicker() }
+            onDismiss = { viewModel.dismissTagPicker() },
+            onCreateTag = { viewModel.showCreateTag() }
+        )
+    }
+
+    // Create tag dialog (shared between upload and tag picker)
+    if (state.isCreatingTag) {
+        CreateTagDialog(
+            onDismiss = { viewModel.dismissCreateTag() },
+            onCreate = { name, color -> viewModel.createTag(name, color) }
         )
     }
 
@@ -169,12 +178,13 @@ fun UploadScreen(
 @Composable
 private fun TagPickerDialog(
     documentName: String,
-    tags: List<com.papra.app.data.api.PapraTag>,
+    tags: List<PapraTag>,
     selectedTagIds: Set<String>,
     isLoading: Boolean,
     onToggleTag: (String) -> Unit,
     onConfirm: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onCreateTag: () -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -195,7 +205,7 @@ private fun TagPickerDialog(
                         }
                     }
                     tags.isEmpty() -> {
-                        Text("No tags found. Create tags in Papra first.",
+                        Text("No tags found. Create one below.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.outline)
                     }
@@ -216,13 +226,92 @@ private fun TagPickerDialog(
                     }
                 }
 
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = onCreateTag, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Add, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Create new tag")
+                }
+
+                Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
                         Text("Skip")
                     }
                     Button(onClick = onConfirm, modifier = Modifier.weight(1f)) {
                         Text(if (selectedTagIds.isEmpty()) "Done" else "Add ${selectedTagIds.size} tag(s)")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun CreateTagDialog(
+    onDismiss: () -> Unit,
+    onCreate: (String, String) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var color by remember { mutableStateOf("#2563EB") }
+    val presetColors = listOf(
+        "#2563EB", "#DC2626", "#16A34A", "#CA8A04", "#9333EA",
+        "#DB2777", "#0891B2", "#EA580C", "#4B5563", "#000000"
+    )
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            tonalElevation = 6.dp
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text("Create new tag", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(12.dp))
+
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Tag name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(Modifier.height(12.dp))
+                Text("Color", style = MaterialTheme.typography.labelSmall)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    presetColors.forEach { c ->
+                        val selected = c == color
+                        Surface(
+                            color = androidx.compose.ui.graphics.Color(android.graphics.Color.parseColor(c)),
+                            shape = RoundedCornerShape(20.dp),
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clickable { color = c }
+                                .then(if (selected) Modifier.padding(2.dp) else Modifier),
+                            border = if (selected) {
+                                androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.onSurface)
+                            } else null
+                        ) {
+                            if (selected) {
+                                Icon(Icons.Default.Check, null, tint = androidx.compose.ui.graphics.Color.White,
+                                    modifier = Modifier.padding(6.dp))
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(20.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
+                        Text("Cancel")
+                    }
+                    Button(
+                        onClick = { onCreate(name, color) },
+                        enabled = name.isNotBlank(),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Create")
                     }
                 }
             }

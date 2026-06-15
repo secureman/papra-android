@@ -16,6 +16,7 @@ import okio.BufferedSink
 import okio.source
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
@@ -30,6 +31,7 @@ data class PapraDocument(
     val name: String,
     val createdAt: String,
     val size: Long,
+    val mimeType: String = "",
     val tags: List<PapraTag> = emptyList()
 )
 
@@ -70,7 +72,7 @@ class PapraApiClient(private val context: Context) {
             }
         }
 
-    // ── Upload document — returns document ID ────────────────────────────────
+    // ── Upload document ──────────────────────────────────────────────────────
 
     suspend fun uploadDocument(
         baseUrl: String,
@@ -143,16 +145,23 @@ class PapraApiClient(private val context: Context) {
         baseUrl: String,
         apiKey: String,
         organizationId: String,
-        search: String = ""
+        search: String = "",
+        sortBy: String = "createdAt",
+        sortOrder: String = "desc"
     ): ApiResult<List<PapraDocument>> = withContext(Dispatchers.IO) {
         try {
-            val url = if (search.isBlank())
-                "$baseUrl/api/organizations/$organizationId/documents"
-            else
-                "$baseUrl/api/organizations/$organizationId/documents/search?searchQuery=${Uri.encode(search)}"
+            val urlBuilder = StringBuilder("$baseUrl/api/organizations/$organizationId/documents")
+            val params = mutableListOf<String>()
+            if (search.isNotBlank()) params.add("searchQuery=${Uri.encode(search)}")
+            if (sortBy.isNotBlank()) params.add("sortBy=$sortBy")
+            if (sortOrder.isNotBlank()) params.add("sortOrder=$sortOrder")
+            if (params.isNotEmpty()) {
+                urlBuilder.append("?")
+                urlBuilder.append(params.joinToString("&"))
+            }
 
             val request = Request.Builder()
-                .url(url)
+                .url(urlBuilder.toString())
                 .header("Authorization", "Bearer $apiKey")
                 .get()
                 .build()
@@ -200,6 +209,76 @@ class PapraApiClient(private val context: Context) {
         }
     }
 
+    // ── Rename document ──────────────────────────────────────────────────────
+
+    suspend fun renameDocument(
+        baseUrl: String,
+        apiKey: String,
+        organizationId: String,
+        documentId: String,
+        newName: String
+    ): ApiResult<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val body = JSONObject().put("name", newName).toString()
+                .toRequestBody("application/json".toMediaType())
+
+            val request = Request.Builder()
+                .url("$baseUrl/api/organizations/$organizationId/documents/$documentId")
+                .header("Authorization", "Bearer $apiKey")
+                .patch(body)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.isSuccessful -> ApiResult.Success(Unit)
+                    response.code == 401 -> ApiResult.Error(401, "Invalid API key")
+                    else -> ApiResult.Error(response.code, "HTTP ${response.code}")
+                }
+            }
+        } catch (e: IOException) {
+            ApiResult.NetworkError(e.message ?: "Network error")
+        }
+    }
+
+    // ── Download to cache ────────────────────────────────────────────────────
+
+    suspend fun downloadToCache(
+        baseUrl: String,
+        apiKey: String,
+        organizationId: String,
+        documentId: String,
+        fileName: String
+    ): ApiResult<File> = withContext(Dispatchers.IO) {
+        try {
+            val cacheDir = File(context.cacheDir, "papra_docs").apply { mkdirs() }
+            val outFile = File(cacheDir, "${documentId}_${fileName}")
+
+            if (outFile.exists() && outFile.length() > 0) {
+                return@withContext ApiResult.Success(outFile)
+            }
+
+            val request = Request.Builder()
+                .url("$baseUrl/api/organizations/$organizationId/documents/$documentId/file")
+                .header("Authorization", "Bearer $apiKey")
+                .get()
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext ApiResult.Error(response.code, "HTTP ${response.code}")
+                }
+                response.body?.byteStream()?.use { input ->
+                    outFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                ApiResult.Success(outFile)
+            }
+        } catch (e: IOException) {
+            ApiResult.NetworkError(e.message ?: "Network error")
+        }
+    }
+
     // ── Tags ─────────────────────────────────────────────────────────────────
 
     suspend fun listTags(
@@ -219,6 +298,45 @@ class PapraApiClient(private val context: Context) {
                     response.isSuccessful -> {
                         val body = response.body?.string() ?: "{}"
                         ApiResult.Success(parseTags(body))
+                    }
+                    else -> ApiResult.Error(response.code, "HTTP ${response.code}")
+                }
+            }
+        } catch (e: IOException) {
+            ApiResult.NetworkError(e.message ?: "Network error")
+        }
+    }
+
+    suspend fun createTag(
+        baseUrl: String,
+        apiKey: String,
+        organizationId: String,
+        name: String,
+        color: String
+    ): ApiResult<PapraTag> = withContext(Dispatchers.IO) {
+        try {
+            val body = JSONObject()
+                .put("name", name)
+                .put("color", color)
+                .toString()
+                .toRequestBody("application/json".toMediaType())
+
+            val request = Request.Builder()
+                .url("$baseUrl/api/organizations/$organizationId/tags")
+                .header("Authorization", "Bearer $apiKey")
+                .post(body)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.isSuccessful -> {
+                        val respBody = response.body?.string() ?: "{}"
+                        val obj = JSONObject(respBody)
+                        ApiResult.Success(PapraTag(
+                            id = obj.optString("id", ""),
+                            name = obj.optString("name", name),
+                            color = obj.optString("color", color)
+                        ))
                     }
                     else -> ApiResult.Error(response.code, "HTTP ${response.code}")
                 }
@@ -323,6 +441,7 @@ class PapraApiClient(private val context: Context) {
                     name = obj.optString("name", "Untitled"),
                     createdAt = obj.optString("createdAt", ""),
                     size = obj.optLong("fileSize", 0L),
+                    mimeType = obj.optString("mimeType", ""),
                     tags = tags
                 )
             }
