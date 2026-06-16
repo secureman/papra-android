@@ -11,6 +11,7 @@ import com.papra.app.data.api.PapraApiClient
 import com.papra.app.data.api.PapraTag
 import com.papra.app.data.datastore.PapraSettings
 import com.papra.app.data.datastore.SettingsRepository
+import com.papra.app.util.DEFAULT_TAG_COLOR
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -197,15 +198,35 @@ class UploadViewModel(application: Application) : AndroidViewModel(application) 
         _state.update { it.copy(isCreatingTag = false) }
     }
 
-    fun createTag(name: String, color: String) {
+    /**
+     * FIX #11 (UploadViewModel side): createTag previously called api.createTag and then
+     * unconditionally called api.listTags, ignoring the result of the create call entirely.
+     *
+     * Now:
+     * - On API success: refresh tag list and close the dialog.
+     * - On API error: show a snackbar and leave the dialog open so the user can retry.
+     */
+    fun createTag(name: String, color: String = DEFAULT_TAG_COLOR) {
         val settings = _state.value.settings
         viewModelScope.launch {
-            api.createTag(settings.baseUrl, settings.apiKey, settings.organizationId, name, color)
-            val result = api.listTags(settings.baseUrl, settings.apiKey, settings.organizationId)
-            if (result is ApiResult.Success) {
-                _state.update { it.copy(availableTags = result.data, isCreatingTag = false) }
-            } else {
-                _state.update { it.copy(isCreatingTag = false) }
+            when (val result = api.createTag(settings.baseUrl, settings.apiKey, settings.organizationId, name, color)) {
+                is ApiResult.Success -> {
+                    // Refresh the full tag list so the picker is up-to-date.
+                    val listResult = api.listTags(settings.baseUrl, settings.apiKey, settings.organizationId)
+                    if (listResult is ApiResult.Success) {
+                        _state.update { it.copy(availableTags = listResult.data, isCreatingTag = false) }
+                    } else {
+                        // Tag was created but list refresh failed — close dialog anyway.
+                        _state.update { it.copy(isCreatingTag = false, snackbarMessage = "Tag created") }
+                    }
+                }
+                is ApiResult.Error -> {
+                    _state.update { it.copy(snackbarMessage = "Failed to create tag: ${result.message}") }
+                    // Dialog stays open (isCreatingTag unchanged) so the user can correct and retry.
+                }
+                is ApiResult.NetworkError -> {
+                    _state.update { it.copy(snackbarMessage = "Network error — tag not created") }
+                }
             }
         }
     }

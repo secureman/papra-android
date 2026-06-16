@@ -35,6 +35,7 @@ import com.papra.app.data.api.PapraDocument
 import com.papra.app.data.api.PapraTag
 import com.papra.app.data.datastore.PapraSettings
 import com.papra.app.data.datastore.SettingsRepository
+import com.papra.app.util.DEFAULT_TAG_COLOR
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -70,7 +71,8 @@ fun DocumentsScreen(
     var openingDocId by remember { mutableStateOf<String?>(null) }
     var showCreateTag by remember { mutableStateOf(false) }
     var newTagName by remember { mutableStateOf("") }
-    var newTagColor by remember { mutableStateOf("#3B82F6") }
+    // FIX #15: Unified tag color constant — was "#3B82F6" here vs "#2563EB" in UploadScreen.
+    var newTagColor by remember { mutableStateOf(DEFAULT_TAG_COLOR) }
     var sortField by remember { mutableStateOf(SortField.DATE) }
     var sortOrder by remember { mutableStateOf(SortOrder.DESC) }
     var showSortMenu by remember { mutableStateOf(false) }
@@ -151,7 +153,7 @@ fun DocumentsScreen(
                     onClick = {
                         val target = renameTarget; renameTarget = null
                         scope.launch {
-                            when (val r = api.renameDocument(settings.baseUrl, settings.apiKey, settings.organizationId, target!!.id, renameValue)) {
+                            when (api.renameDocument(settings.baseUrl, settings.apiKey, settings.organizationId, target!!.id, renameValue)) {
                                 is ApiResult.Success -> {
                                     documents = documents.map { if (it.id == target.id) it.copy(name = renameValue) else it }
                                     snackbarHostState.showSnackbar("Renamed")
@@ -175,14 +177,22 @@ fun DocumentsScreen(
             onDismiss = { tagTarget = null },
             onAddTag = { tagId ->
                 scope.launch {
-                    api.addTagToDocument(settings.baseUrl, settings.apiKey, settings.organizationId, doc.id, tagId)
-                    load(searchQuery)
+                    // FIX #11: Surface tag operation errors via snackbar instead of silently reloading.
+                    when (api.addTagToDocument(settings.baseUrl, settings.apiKey, settings.organizationId, doc.id, tagId)) {
+                        is ApiResult.Success -> load(searchQuery)
+                        is ApiResult.Error -> snackbarHostState.showSnackbar("Failed to add tag")
+                        is ApiResult.NetworkError -> snackbarHostState.showSnackbar("Network error — tag not added")
+                    }
                 }
             },
             onRemoveTag = { tagId ->
                 scope.launch {
-                    api.removeTagFromDocument(settings.baseUrl, settings.apiKey, settings.organizationId, doc.id, tagId)
-                    load(searchQuery)
+                    // FIX #11: Same for remove — was a fire-and-forget call before.
+                    when (api.removeTagFromDocument(settings.baseUrl, settings.apiKey, settings.organizationId, doc.id, tagId)) {
+                        is ApiResult.Success -> load(searchQuery)
+                        is ApiResult.Error -> snackbarHostState.showSnackbar("Failed to remove tag")
+                        is ApiResult.NetworkError -> snackbarHostState.showSnackbar("Network error — tag not removed")
+                    }
                 }
             },
             onCreateTag = { showCreateTag = true }
@@ -196,11 +206,13 @@ fun DocumentsScreen(
             title = { Text("Create tag") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedTextField(value = newTagName, onValueChange = { newTagName = it },
-                        label = { Text("Tag name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        value = newTagName, onValueChange = { newTagName = it },
+                        label = { Text("Tag name") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+                    )
                     OutlinedTextField(
                         value = newTagColor, onValueChange = { newTagColor = it },
-                        label = { Text("Color (hex)") }, placeholder = { Text("#3B82F6") },
+                        label = { Text("Color (hex)") }, placeholder = { Text(DEFAULT_TAG_COLOR) },
                         singleLine = true, modifier = Modifier.fillMaxWidth(),
                         leadingIcon = {
                             val c = remember(newTagColor) {
@@ -217,8 +229,13 @@ fun DocumentsScreen(
                         showCreateTag = false
                         scope.launch {
                             val r = api.createTag(settings.baseUrl, settings.apiKey, settings.organizationId, newTagName, newTagColor)
-                            if (r is ApiResult.Success) { availableTags = availableTags + r.data; snackbarHostState.showSnackbar("Tag created"); newTagName = "" }
-                            else snackbarHostState.showSnackbar("Failed to create tag")
+                            if (r is ApiResult.Success) {
+                                availableTags = availableTags + r.data
+                                snackbarHostState.showSnackbar("Tag created")
+                                newTagName = ""
+                            } else {
+                                snackbarHostState.showSnackbar("Failed to create tag")
+                            }
                         }
                     },
                     enabled = newTagName.isNotBlank()
@@ -315,18 +332,17 @@ fun DocumentsScreen(
                                     when (result) {
                                         is ApiResult.Success -> {
                                             val file = result.data
-					val ext = doc.name.substringAfterLast('.', "").lowercase()
-					val mime = doc.mimeType.ifBlank {
-    						MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
-						}
-                                                android.util.Log.d("PapraDebug", "name=${doc.name} ext=$ext mime=$mime docMime=${doc.mimeType} file=${file.absolutePath} fileExists=${file.exists()} fileSize=${file.length()}") 
+                                            val ext = doc.name.substringAfterLast('.', "").lowercase()
+                                            val mime = doc.mimeType.ifBlank {
+                                                MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
+                                            }
+                                            // FIX #12: Debug log removed (was DocumentsScreen.kt:322).
                                             when {
                                                 mime == "application/pdf" ->
                                                     onOpenPdf(file.absolutePath, doc.name)
                                                 mime.startsWith("image/") ->
                                                     onOpenImage(file.absolutePath, doc.name)
                                                 else -> {
-                                                    // External app for everything else
                                                     val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
                                                     val intent = Intent(Intent.ACTION_VIEW).apply {
                                                         setDataAndType(uri, mime)
@@ -398,18 +414,25 @@ private fun TagManagerDialog(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SearchTopBar(query: String, onQueryChange: (String) -> Unit, onSearch: (String) -> Unit, onClose: () -> Unit) {
+private fun SearchTopBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onSearch: (String) -> Unit,
+    onClose: () -> Unit
+) {
     val keyboard = LocalSoftwareKeyboardController.current
     TopAppBar(
         navigationIcon = { IconButton(onClick = onClose) { Icon(Icons.Default.ArrowBack, "Close search") } },
         title = {
             OutlinedTextField(
                 value = query, onValueChange = onQueryChange,
-                placeholder = { Text("Search documents...") }, singleLine = true,
+                placeholder = { Text("Search documents…") }, singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { onSearch(query); keyboard?.hide() }),
-                trailingIcon = { if (query.isNotBlank()) IconButton(onClick = { onQueryChange("") }) { Icon(Icons.Default.Clear, "Clear") } }
+                trailingIcon = {
+                    if (query.isNotBlank()) IconButton(onClick = { onQueryChange("") }) { Icon(Icons.Default.Clear, "Clear") }
+                }
             )
         },
         actions = { IconButton(onClick = { onSearch(query); keyboard?.hide() }) { Icon(Icons.Default.Search, "Search") } }
@@ -465,9 +488,11 @@ private fun DocumentCard(
                             leadingIcon = { Icon(Icons.Default.Label, null) })
                         DropdownMenuItem(text = { Text("Rename") }, onClick = { showMenu = false; onRename() },
                             leadingIcon = { Icon(Icons.Default.Edit, null) })
-                        DropdownMenuItem(text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                        DropdownMenuItem(
+                            text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
                             onClick = { showMenu = false; onDelete() },
-                            leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) })
+                            leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) }
+                        )
                     }
                 }
             }

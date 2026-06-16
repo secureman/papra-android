@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    FileProvider path configuration for Papra.
+
+    <cache-path> exposes Context.getCacheDir() — this is where downloadDocumentToCache()
+    writes papra_* temp files that are then shared via FileProvider.getUriForFile().
+
+    <external-cache-path> covers Context.getExternalCacheDir() as a fallback in case
+    any future code writes to external cache instead.
+-->
+<paths>
+    <cache-path
+        name="papra_cache"
+        path="." />
+    <external-cache-path
+        name="papra_external_cache"
+        path="." />
+</paths>

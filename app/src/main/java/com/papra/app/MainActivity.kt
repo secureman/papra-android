@@ -2,6 +2,7 @@ package com.papra.app
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -22,6 +23,7 @@ import com.papra.app.navigation.Screen
 import com.papra.app.navigation.ViewerScreen
 import com.papra.app.ui.screens.*
 import com.papra.app.ui.theme.PapraTheme
+import com.papra.app.util.cleanPapraCache
 import java.net.URLDecoder
 
 class MainActivity : ComponentActivity() {
@@ -29,12 +31,32 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        // FIX #4: Clean stale cached files from previous sessions on every app start.
+        // Files are written to cacheDir by downloadDocumentToCache() and never removed otherwise.
+        cleanPapraCache(this)
+
+        // FIX #16: Replace deprecated getParcelableExtra / getParcelableArrayListExtra with
+        // the API 33+ typed overloads. The @Suppress fallback is intentional for API < 33.
         val sharedUris = mutableListOf<Uri>()
         when (intent?.action) {
-            Intent.ACTION_SEND ->
-                (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { sharedUris.add(it) }
-            Intent.ACTION_SEND_MULTIPLE ->
-                intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.let { sharedUris.addAll(it) }
+            Intent.ACTION_SEND -> {
+                val uri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                }
+                uri?.let { sharedUris.add(it) }
+            }
+            Intent.ACTION_SEND_MULTIPLE -> {
+                val uris: ArrayList<Uri>? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+                }
+                uris?.let { sharedUris.addAll(it) }
+            }
         }
 
         setContent {
