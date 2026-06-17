@@ -23,7 +23,6 @@ import com.papra.app.navigation.Screen
 import com.papra.app.navigation.ViewerScreen
 import com.papra.app.ui.screens.*
 import com.papra.app.ui.theme.PapraTheme
-import com.papra.app.util.cleanPapraCache
 import java.net.URLDecoder
 
 class MainActivity : ComponentActivity() {
@@ -31,9 +30,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // FIX #4: Clean stale cached files from previous sessions on every app start.
-        // Files are written to cacheDir by downloadDocumentToCache() and never removed otherwise.
-        cleanPapraCache(this)
+        // NOTE: No cache cleanup here. Android's own cacheDir eviction handles stale files,
+        // and an aggressive per-onCreate wipe was deleting files out from under the viewers
+        // on configuration changes (rotation, theme, font scale), causing
+        // "Failed to open document" / blank PDF/image errors. Cache trimming is now done
+        // by trimPapraCache() invoked *after* a successful download in PapraApiClient.
 
         // FIX #16: Replace deprecated getParcelableExtra / getParcelableArrayListExtra with
         // the API 33+ typed overloads. The @Suppress fallback is intentional for API < 33.

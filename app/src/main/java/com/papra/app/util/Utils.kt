@@ -8,20 +8,42 @@ import android.content.Context
  */
 const val DEFAULT_TAG_COLOR = "#3B82F6"
 
+/** Default cap for the papra_* cache, in bytes. 50 MB covers ~100 typical docs comfortably. */
+private const val DEFAULT_CACHE_CAP_BYTES = 50L * 1024L * 1024L
+
 /**
- * FIX #4: Delete all papra_* temp files from cacheDir.
+ * Trim papra_* files in cacheDir so that their total size stays ≤ [maxBytes].
  *
- * downloadDocumentToCache() names every file "papra_<documentId>_<name>", so this
- * prefix match is safe — it won't touch unrelated cache entries from other libraries.
+ * Replaces the previous `cleanPapraCache()`, which ran unconditionally on every
+ * MainActivity.onCreate() (i.e. on every rotation, theme change, font-scale change,
+ * process restart…) and deleted the file out from under the viewer, producing
+ * "Cannot open this PDF" / "Failed to load image" / "Failed to open document" errors.
  *
- * Called from MainActivity.onCreate() to clear stale files from previous sessions.
+ * Semantics:
+ * - No-op when total size is already under the cap (the common case).
+ * - Otherwise, delete oldest files first (by lastModified), keeping recently-opened
+ *   documents cached so the viewer can be re-entered cheaply.
+ * - Safe to invoke after every successful download — overhead is a single directory
+ *   listing + sum, both cheap for tens of files.
+ * - Best-effort: never throws. A failure here must never break the open-doc flow.
  */
-fun cleanPapraCache(context: Context) {
+fun trimPapraCache(context: Context, maxBytes: Long = DEFAULT_CACHE_CAP_BYTES) {
     try {
-        context.cacheDir
-            .listFiles { file -> file.name.startsWith("papra_") }
-            ?.forEach { it.delete() }
+        val files = context.cacheDir
+            .listFiles { f -> f.isFile && f.name.startsWith("papra_") }
+            ?: return
+
+        var total = files.sumOf { it.length() }
+        if (total <= maxBytes) return
+
+        // Oldest first — least recently accessed gets evicted.
+        val sorted = files.sortedBy { it.lastModified() }
+        for (f in sorted) {
+            if (total <= maxBytes) break
+            val size = f.length()
+            if (f.delete()) total -= size
+        }
     } catch (_: Exception) {
-        // Swallow — cache cleanup is best-effort; never crash the app over it.
+        // Best-effort — never crash the app over cache housekeeping.
     }
 }

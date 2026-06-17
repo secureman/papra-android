@@ -1,0 +1,317 @@
+From e0baa6cf3f0710a63b54ceca103c0f2c961f4f87 Mon Sep 17 00:00:00 2001
+From: Mavis <Mavis@mavis.local>
+Date: Wed, 17 Jun 2026 22:44:27 +0000
+Subject: [PATCH] fix: stop wiping cached downloads on activity recreation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+cleanPapraCache() ran unconditionally in MainActivity.onCreate(), which fires
+on every configuration change (rotation, theme switch, font scale) and after
+process death + restart. It deleted papra_* files from cacheDir while the
+PDF/image viewer was still trying to read them, producing 'Cannot open this PDF',
+'Failed to load image', and the 'Failed to open document' snackbar in
+DocumentsScreen when reopening.
+
+Additional fixes in the same area:
+
+- downloadDocumentToCache() now rejects null/zero-byte response bodies and
+  cleans up partial files on IOException, so the viewer never gets handed a
+  Success result for a 0-byte file (which silently broke PdfRenderer /
+  BitmapFactory.decodeFile).
+- PdfViewerScreen + ImageViewerScreen detect missing/empty files up front and
+  show a clear 'file no longer cached, go back and reopen' message instead of
+  trying to render a non-existent file or crashing FileProvider.getUriForFile().
+- Replaced cleanPapraCache() with trimPapraCache(maxBytes=50MB) — LRU eviction
+  based on lastModified, no-op under the cap, called only after a successful
+  download. Bound is checked against total papra_* file sizes; oldest first.
+
+Build verified: ./gradlew assembleDebug → BUILD SUCCESSFUL.
+---
+ .../main/java/com/papra/app/MainActivity.kt   |  9 +--
+ .../com/papra/app/data/api/PapraApiClient.kt  | 28 ++++++++-
+ .../papra/app/ui/screens/ImageViewerScreen.kt | 28 ++++++++-
+ .../papra/app/ui/screens/PdfViewerScreen.kt   | 63 ++++++++++++-------
+ app/src/main/java/com/papra/app/util/Utils.kt | 42 ++++++++++---
+ 5 files changed, 132 insertions(+), 38 deletions(-)
+
+diff --git a/app/src/main/java/com/papra/app/MainActivity.kt b/app/src/main/java/com/papra/app/MainActivity.kt
+index 2fdede0..c67b6d4 100644
+--- a/app/src/main/java/com/papra/app/MainActivity.kt
++++ b/app/src/main/java/com/papra/app/MainActivity.kt
+@@ -23,7 +23,6 @@ import com.papra.app.navigation.Screen
+ import com.papra.app.navigation.ViewerScreen
+ import com.papra.app.ui.screens.*
+ import com.papra.app.ui.theme.PapraTheme
+-import com.papra.app.util.cleanPapraCache
+ import java.net.URLDecoder
+ 
+ class MainActivity : ComponentActivity() {
+@@ -31,9 +30,11 @@ class MainActivity : ComponentActivity() {
+         super.onCreate(savedInstanceState)
+         enableEdgeToEdge()
+ 
+-        // FIX #4: Clean stale cached files from previous sessions on every app start.
+-        // Files are written to cacheDir by downloadDocumentToCache() and never removed otherwise.
+-        cleanPapraCache(this)
++        // NOTE: No cache cleanup here. Android's own cacheDir eviction handles stale files,
++        // and an aggressive per-onCreate wipe was deleting files out from under the viewers
++        // on configuration changes (rotation, theme, font scale), causing
++        // "Failed to open document" / blank PDF/image errors. Cache trimming is now done
++        // by trimPapraCache() invoked *after* a successful download in PapraApiClient.
+ 
+         // FIX #16: Replace deprecated getParcelableExtra / getParcelableArrayListExtra with
+         // the API 33+ typed overloads. The @Suppress fallback is intentional for API < 33.
+diff --git a/app/src/main/java/com/papra/app/data/api/PapraApiClient.kt b/app/src/main/java/com/papra/app/data/api/PapraApiClient.kt
+index 7073bde..5202cdb 100644
+--- a/app/src/main/java/com/papra/app/data/api/PapraApiClient.kt
++++ b/app/src/main/java/com/papra/app/data/api/PapraApiClient.kt
+@@ -3,6 +3,7 @@ package com.papra.app.data.api
+ import android.content.Context
+ import android.net.Uri
+ import android.provider.OpenableColumns
++import com.papra.app.util.trimPapraCache
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
+ import okhttp3.MediaType.Companion.toMediaTypeOrNull
+@@ -184,10 +185,33 @@ class PapraApiClient(private val context: Context) {
+ 
+             client.newCall(request).execute().use { response ->
+                 if (!response.isSuccessful) return@withContext ApiResult.Error(response.code, "HTTP ${response.code}")
++
++                val body = response.body
++                if (body == null) return@withContext ApiResult.NetworkError("Empty response body")
++
+                 val cacheFile = java.io.File(context.cacheDir, "papra_$documentId${fileExtension(fileName)}")
+-                response.body?.byteStream()?.use { input ->
+-                    cacheFile.outputStream().use { output -> input.copyTo(output) }
++                try {
++                    body.byteStream().use { input ->
++                        cacheFile.outputStream().use { output -> input.copyTo(output) }
++                    }
++                } catch (e: IOException) {
++                    // Don't leave a half-written file lying around — callers assume Success means usable.
++                    cacheFile.delete()
++                    return@withContext ApiResult.NetworkError(e.message ?: "Network error")
+                 }
++
++                // Guard against servers that return 200 with an empty/zero-length body
++                // (was previously silently returned as Success, which then crashed the
++                // viewer with "Cannot open this PDF" / "Failed to load image").
++                if (cacheFile.length() == 0L) {
++                    cacheFile.delete()
++                    return@withContext ApiResult.NetworkError("Server returned an empty file")
++                }
++
++                // Bound the cache size opportunistically. No-op under the cap; deletes the
++                // least-recently-accessed papra_* files first if we're over budget.
++                trimPapraCache(context)
++
+                 ApiResult.Success(cacheFile)
+             }
+         } catch (e: IOException) {
+diff --git a/app/src/main/java/com/papra/app/ui/screens/ImageViewerScreen.kt b/app/src/main/java/com/papra/app/ui/screens/ImageViewerScreen.kt
+index 111faf9..e89d938 100644
+--- a/app/src/main/java/com/papra/app/ui/screens/ImageViewerScreen.kt
++++ b/app/src/main/java/com/papra/app/ui/screens/ImageViewerScreen.kt
+@@ -19,6 +19,7 @@ import androidx.compose.ui.input.pointer.pointerInput
+ import androidx.compose.ui.layout.ContentScale
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.text.style.TextOverflow
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
+@@ -46,6 +47,13 @@ fun ImageViewerScreen(
+ 
+     LaunchedEffect(filePath) {
+         withContext(Dispatchers.IO) {
++            val file = java.io.File(filePath)
++            if (!file.exists() || file.length() == 0L) {
++                // Cached file gone (system pressure, manual clear, or download failure).
++                // Leave bitmap null and let the UI render the missing-file message below.
++                return@withContext
++            }
++
+             // FIX #3: Downsample large images before decoding to prevent OOM.
+             //
+             // Step 1 — decode only bounds (no pixel memory allocated).
+@@ -100,7 +108,25 @@ fun ImageViewerScreen(
+         ) {
+             when {
+                 isLoading -> CircularProgressIndicator(color = Color.White)
+-                bitmap == null -> Text("Failed to load image", color = Color.White)
++                bitmap == null -> {
++                    val file = remember(filePath) { java.io.File(filePath) }
++                    val missing = !file.exists() || file.length() == 0L
++                    Column(
++                        horizontalAlignment = Alignment.CenterHorizontally,
++                        verticalArrangement = Arrangement.spacedBy(12.dp),
++                        modifier = Modifier.padding(32.dp)
++                    ) {
++                        Text(
++                            if (missing) "This file is no longer cached. Go back and reopen the document to download it again."
++                            else "Failed to load image",
++                            color = Color.White,
++                            style = MaterialTheme.typography.bodyMedium
++                        )
++                        if (missing) {
++                            OutlinedButton(onClick = onBack) { Text("Go back", color = Color.White) }
++                        }
++                    }
++                }
+                 else -> Image(
+                     bitmap = bitmap!!.asImageBitmap(),
+                     contentDescription = documentName,
+diff --git a/app/src/main/java/com/papra/app/ui/screens/PdfViewerScreen.kt b/app/src/main/java/com/papra/app/ui/screens/PdfViewerScreen.kt
+index e416a37..e7dc604 100644
+--- a/app/src/main/java/com/papra/app/ui/screens/PdfViewerScreen.kt
++++ b/app/src/main/java/com/papra/app/ui/screens/PdfViewerScreen.kt
+@@ -63,16 +63,22 @@ fun PdfViewerScreen(
+     DisposableEffect(filePath) {
+         try {
+             val file = File(filePath)
+-            val openedPfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+-            val openedRenderer = PdfRenderer(openedPfd)
+-            if (openedRenderer.pageCount == 0) {
+-                openedRenderer.close()
+-                openedPfd.close()
+-                errorMessage = "PDF has no pages or could not be read"
++            if (!file.exists() || file.length() == 0L) {
++                // File was evicted from cacheDir (e.g. system pressure, or manual clear)
++                // before we got to render it. Surface a clear, actionable error.
++                errorMessage = "This file is no longer cached. Go back and reopen the document to download it again."
+             } else {
+-                pfd = openedPfd
+-                renderer = openedRenderer
+-                pageCount = openedRenderer.pageCount
++                val openedPfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
++                val openedRenderer = PdfRenderer(openedPfd)
++                if (openedRenderer.pageCount == 0) {
++                    openedRenderer.close()
++                    openedPfd.close()
++                    errorMessage = "PDF has no pages or could not be read"
++                } else {
++                    pfd = openedPfd
++                    renderer = openedRenderer
++                    pageCount = openedRenderer.pageCount
++                }
+             }
+         } catch (e: SecurityException) {
+             errorMessage = "PDF is password protected"
+@@ -149,6 +155,8 @@ fun PdfViewerScreen(
+                 }
+ 
+                 errorMessage != null -> {
++                    val file = remember(filePath) { File(filePath) }
++                    val fileAvailable = file.exists() && file.length() > 0L
+                     Column(
+                         modifier = Modifier
+                             .align(Alignment.Center)
+@@ -161,20 +169,33 @@ fun PdfViewerScreen(
+                             color = Color.White,
+                             style = MaterialTheme.typography.bodyMedium
+                         )
+-                        OutlinedButton(
+-                            onClick = {
+-                                val file = File(filePath)
+-                                val uri = androidx.core.content.FileProvider.getUriForFile(
+-                                    context, "${context.packageName}.fileprovider", file
+-                                )
+-                                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+-                                    setDataAndType(uri, "application/pdf")
+-                                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
++                        if (fileAvailable) {
++                            // File is on disk but PdfRenderer refused it — offer to hand it
++                            // off to a system viewer (e.g. Adobe Acrobat, Google Drive).
++                            OutlinedButton(
++                                onClick = {
++                                    try {
++                                        val uri = androidx.core.content.FileProvider.getUriForFile(
++                                            context, "${context.packageName}.fileprovider", file
++                                        )
++                                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
++                                            setDataAndType(uri, "application/pdf")
++                                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
++                                        }
++                                        context.startActivity(android.content.Intent.createChooser(intent, "Open with"))
++                                    } catch (_: Exception) {
++                                        // No app to handle it — just send the user back.
++                                        onBack()
++                                    }
+                                 }
+-                                context.startActivity(android.content.Intent.createChooser(intent, "Open with"))
++                            ) {
++                                Text("Open with external app", color = Color.White)
++                            }
++                        } else {
++                            // File is gone — only sensible action is to go back and re-download.
++                            OutlinedButton(onClick = onBack) {
++                                Text("Go back", color = Color.White)
+                             }
+-                        ) {
+-                            Text("Open with external app", color = Color.White)
+                         }
+                     }
+                 }
+diff --git a/app/src/main/java/com/papra/app/util/Utils.kt b/app/src/main/java/com/papra/app/util/Utils.kt
+index a25889b..3d32150 100644
+--- a/app/src/main/java/com/papra/app/util/Utils.kt
++++ b/app/src/main/java/com/papra/app/util/Utils.kt
+@@ -8,20 +8,42 @@ import android.content.Context
+  */
+ const val DEFAULT_TAG_COLOR = "#3B82F6"
+ 
++/** Default cap for the papra_* cache, in bytes. 50 MB covers ~100 typical docs comfortably. */
++private const val DEFAULT_CACHE_CAP_BYTES = 50L * 1024L * 1024L
++
+ /**
+- * FIX #4: Delete all papra_* temp files from cacheDir.
++ * Trim papra_* files in cacheDir so that their total size stays ≤ [maxBytes].
+  *
+- * downloadDocumentToCache() names every file "papra_<documentId>_<name>", so this
+- * prefix match is safe — it won't touch unrelated cache entries from other libraries.
++ * Replaces the previous `cleanPapraCache()`, which ran unconditionally on every
++ * MainActivity.onCreate() (i.e. on every rotation, theme change, font-scale change,
++ * process restart…) and deleted the file out from under the viewer, producing
++ * "Cannot open this PDF" / "Failed to load image" / "Failed to open document" errors.
+  *
+- * Called from MainActivity.onCreate() to clear stale files from previous sessions.
++ * Semantics:
++ * - No-op when total size is already under the cap (the common case).
++ * - Otherwise, delete oldest files first (by lastModified), keeping recently-opened
++ *   documents cached so the viewer can be re-entered cheaply.
++ * - Safe to invoke after every successful download — overhead is a single directory
++ *   listing + sum, both cheap for tens of files.
++ * - Best-effort: never throws. A failure here must never break the open-doc flow.
+  */
+-fun cleanPapraCache(context: Context) {
++fun trimPapraCache(context: Context, maxBytes: Long = DEFAULT_CACHE_CAP_BYTES) {
+     try {
+-        context.cacheDir
+-            .listFiles { file -> file.name.startsWith("papra_") }
+-            ?.forEach { it.delete() }
++        val files = context.cacheDir
++            .listFiles { f -> f.isFile && f.name.startsWith("papra_") }
++            ?: return
++
++        var total = files.sumOf { it.length() }
++        if (total <= maxBytes) return
++
++        // Oldest first — least recently accessed gets evicted.
++        val sorted = files.sortedBy { it.lastModified() }
++        for (f in sorted) {
++            if (total <= maxBytes) break
++            val size = f.length()
++            if (f.delete()) total -= size
++        }
+     } catch (_: Exception) {
+-        // Swallow — cache cleanup is best-effort; never crash the app over it.
++        // Best-effort — never crash the app over cache housekeeping.
+     }
+-}
++}
+\ No newline at end of file
+-- 
+2.39.5
+

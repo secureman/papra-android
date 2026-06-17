@@ -63,16 +63,22 @@ fun PdfViewerScreen(
     DisposableEffect(filePath) {
         try {
             val file = File(filePath)
-            val openedPfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-            val openedRenderer = PdfRenderer(openedPfd)
-            if (openedRenderer.pageCount == 0) {
-                openedRenderer.close()
-                openedPfd.close()
-                errorMessage = "PDF has no pages or could not be read"
+            if (!file.exists() || file.length() == 0L) {
+                // File was evicted from cacheDir (e.g. system pressure, or manual clear)
+                // before we got to render it. Surface a clear, actionable error.
+                errorMessage = "This file is no longer cached. Go back and reopen the document to download it again."
             } else {
-                pfd = openedPfd
-                renderer = openedRenderer
-                pageCount = openedRenderer.pageCount
+                val openedPfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                val openedRenderer = PdfRenderer(openedPfd)
+                if (openedRenderer.pageCount == 0) {
+                    openedRenderer.close()
+                    openedPfd.close()
+                    errorMessage = "PDF has no pages or could not be read"
+                } else {
+                    pfd = openedPfd
+                    renderer = openedRenderer
+                    pageCount = openedRenderer.pageCount
+                }
             }
         } catch (e: SecurityException) {
             errorMessage = "PDF is password protected"
@@ -149,6 +155,8 @@ fun PdfViewerScreen(
                 }
 
                 errorMessage != null -> {
+                    val file = remember(filePath) { File(filePath) }
+                    val fileAvailable = file.exists() && file.length() > 0L
                     Column(
                         modifier = Modifier
                             .align(Alignment.Center)
@@ -161,20 +169,33 @@ fun PdfViewerScreen(
                             color = Color.White,
                             style = MaterialTheme.typography.bodyMedium
                         )
-                        OutlinedButton(
-                            onClick = {
-                                val file = File(filePath)
-                                val uri = androidx.core.content.FileProvider.getUriForFile(
-                                    context, "${context.packageName}.fileprovider", file
-                                )
-                                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
-                                    setDataAndType(uri, "application/pdf")
-                                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        if (fileAvailable) {
+                            // File is on disk but PdfRenderer refused it — offer to hand it
+                            // off to a system viewer (e.g. Adobe Acrobat, Google Drive).
+                            OutlinedButton(
+                                onClick = {
+                                    try {
+                                        val uri = androidx.core.content.FileProvider.getUriForFile(
+                                            context, "${context.packageName}.fileprovider", file
+                                        )
+                                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                                            setDataAndType(uri, "application/pdf")
+                                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        context.startActivity(android.content.Intent.createChooser(intent, "Open with"))
+                                    } catch (_: Exception) {
+                                        // No app to handle it — just send the user back.
+                                        onBack()
+                                    }
                                 }
-                                context.startActivity(android.content.Intent.createChooser(intent, "Open with"))
+                            ) {
+                                Text("Open with external app", color = Color.White)
                             }
-                        ) {
-                            Text("Open with external app", color = Color.White)
+                        } else {
+                            // File is gone — only sensible action is to go back and re-download.
+                            OutlinedButton(onClick = onBack) {
+                                Text("Go back", color = Color.White)
+                            }
                         }
                     }
                 }

@@ -19,6 +19,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.style.TextOverflow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -46,6 +47,13 @@ fun ImageViewerScreen(
 
     LaunchedEffect(filePath) {
         withContext(Dispatchers.IO) {
+            val file = java.io.File(filePath)
+            if (!file.exists() || file.length() == 0L) {
+                // Cached file gone (system pressure, manual clear, or download failure).
+                // Leave bitmap null and let the UI render the missing-file message below.
+                return@withContext
+            }
+
             // FIX #3: Downsample large images before decoding to prevent OOM.
             //
             // Step 1 — decode only bounds (no pixel memory allocated).
@@ -100,7 +108,25 @@ fun ImageViewerScreen(
         ) {
             when {
                 isLoading -> CircularProgressIndicator(color = Color.White)
-                bitmap == null -> Text("Failed to load image", color = Color.White)
+                bitmap == null -> {
+                    val file = remember(filePath) { java.io.File(filePath) }
+                    val missing = !file.exists() || file.length() == 0L
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.padding(32.dp)
+                    ) {
+                        Text(
+                            if (missing) "This file is no longer cached. Go back and reopen the document to download it again."
+                            else "Failed to load image",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        if (missing) {
+                            OutlinedButton(onClick = onBack) { Text("Go back", color = Color.White) }
+                        }
+                    }
+                }
                 else -> Image(
                     bitmap = bitmap!!.asImageBitmap(),
                     contentDescription = documentName,

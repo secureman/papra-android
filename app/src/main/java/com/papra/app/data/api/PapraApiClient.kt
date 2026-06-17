@@ -3,6 +3,7 @@ package com.papra.app.data.api
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.papra.app.util.trimPapraCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -184,10 +185,33 @@ class PapraApiClient(private val context: Context) {
 
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext ApiResult.Error(response.code, "HTTP ${response.code}")
+
+                val body = response.body
+                if (body == null) return@withContext ApiResult.NetworkError("Empty response body")
+
                 val cacheFile = java.io.File(context.cacheDir, "papra_$documentId${fileExtension(fileName)}")
-                response.body?.byteStream()?.use { input ->
-                    cacheFile.outputStream().use { output -> input.copyTo(output) }
+                try {
+                    body.byteStream().use { input ->
+                        cacheFile.outputStream().use { output -> input.copyTo(output) }
+                    }
+                } catch (e: IOException) {
+                    // Don't leave a half-written file lying around — callers assume Success means usable.
+                    cacheFile.delete()
+                    return@withContext ApiResult.NetworkError(e.message ?: "Network error")
                 }
+
+                // Guard against servers that return 200 with an empty/zero-length body
+                // (was previously silently returned as Success, which then crashed the
+                // viewer with "Cannot open this PDF" / "Failed to load image").
+                if (cacheFile.length() == 0L) {
+                    cacheFile.delete()
+                    return@withContext ApiResult.NetworkError("Server returned an empty file")
+                }
+
+                // Bound the cache size opportunistically. No-op under the cap; deletes the
+                // least-recently-accessed papra_* files first if we're over budget.
+                trimPapraCache(context)
+
                 ApiResult.Success(cacheFile)
             }
         } catch (e: IOException) {
