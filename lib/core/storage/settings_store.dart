@@ -8,7 +8,8 @@ class AppSettings {
   const AppSettings({
     this.serverUrl = '',
     this.themeMode = AppThemeMode.system,
-    this.rememberMe = false,
+    // "Stay signed in" is on by default so sessions persist across launches.
+    this.rememberMe = true,
     this.lastOrgId,
     this.lastOrgName,
     this.userEmail,
@@ -44,7 +45,7 @@ class SettingsStore {
     return AppSettings(
       serverUrl: p.getString(_kServerUrl) ?? '',
       themeMode: _themeFromName(p.getString(_kThemeMode)),
-      rememberMe: p.getBool(_kRememberMe) ?? false,
+      rememberMe: p.getBool(_kRememberMe) ?? true,
       lastOrgId: p.getString(_kLastOrgId),
       lastOrgName: p.getString(_kLastOrgName),
       userEmail: p.getString(_kUserEmail),
