@@ -1,8 +1,8 @@
 <div align="center">
-
+This app is Fully Vibe Coded
 # Papra — Android client
 
-The Android app for [Papra](https://github.com/papra-hq/papra), the minimalistic
+The Unofficial Android app for [Papra](https://github.com/papra-hq/papra), the minimalistic
 self-hosted document management and archiving platform.
 
 Store, search, and retrieve your documents from your Android device — connected
@@ -33,15 +33,6 @@ to your own Papra server.
 ## Requirements
 
 - Flutter 3.44+ (Dart SDK `^3.12.2`)
-- An Android device or emulator (Android 7.0+, minSdk 24)
-- A self-hosted Papra server. See the
-  [self-hosting guide](https://docs.papra.app) — quick start:
-
-  ```sh
-  docker run -d --name papra -p 1221:1221 \
-    -e AUTH_SECRET=a-dummy-secret-for-testing-purposes-only \
-    ghcr.io/papra-hq/papra:latest
-  ```
 
 ## Getting started
 
@@ -78,8 +69,6 @@ flutter test
 ## Branches
 
 - `main` — this client for the official [papra-hq/papra](https://github.com/papra-hq/papra) server.
-- `fork-client` — a client for a [community fork](https://github.com/secureman/papra) with extra features (folders, backups).
-
 ## Related
 
 - [Papra server](https://github.com/papra-hq/papra) — the platform itself
