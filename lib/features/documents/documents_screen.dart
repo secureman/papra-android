@@ -493,6 +493,59 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
     }
   }
 
+  /// Exports the original file to a user-chosen folder on the device (SAF),
+  /// with a live progress dialog.
+  Future<void> _downloadDocument(PapraDocument document) async {
+    final client = ref.read(apiClientProvider);
+    if (client == null) return;
+
+    final progress = ValueNotifier<double>(0);
+    unawaited(
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => ValueListenableBuilder<double>(
+          valueListenable: progress,
+          builder: (context, value, child) => AlertDialog(
+            title: const Text('Downloading…'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(document.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                const SizedBox(height: 16),
+                LinearProgressIndicator(value: value == 0 ? null : value),
+                const SizedBox(height: 8),
+                Text(
+                  value == 0 ? 'Choosing destination…' : '${(value * 100).toStringAsFixed(0)}%',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final result = await downloadDocumentToDevice(
+      client: client,
+      document: document,
+      onProgress: (fraction) => progress.value = fraction,
+    );
+    if (!mounted) {
+      progress.dispose();
+      return;
+    }
+    Navigator.of(context, rootNavigator: true).pop();
+    progress.dispose();
+    if (result.cancelled) return;
+    if (result.error != null) {
+      _showSnack(result.error!);
+      return;
+    }
+    _showSnack('Saved “${document.name}”.');
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
@@ -661,6 +714,8 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
               switch (action) {
                 case 'open':
                   _openOriginal(document);
+                case 'download':
+                  _downloadDocument(document);
                 case 'tag':
                   _tagDocument(document);
                 case 'rename':
@@ -671,6 +726,7 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
             },
             itemBuilder: (context) => const [
               PopupMenuItem(value: 'open', child: Text('Open original')),
+              PopupMenuItem(value: 'download', child: Text('Download to device')),
               PopupMenuItem(value: 'tag', child: Text('Tags')),
               PopupMenuItem(value: 'rename', child: Text('Rename')),
               PopupMenuItem(value: 'trash', child: Text('Move to trash')),
