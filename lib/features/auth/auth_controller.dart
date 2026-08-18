@@ -64,14 +64,19 @@ class AuthController extends Notifier<AuthState> {
         return;
       }
 
-      await cookieStore.restore();
+      final api = _authApi(settings.serverUrl);
+      // Cookie and API keys are independent secure-storage reads — fetching
+      // them in parallel shaves a round-trip (secure storage is slow on
+      // Android) off launch.
+      final results = await Future.wait([
+        cookieStore.restore(),
+        ref.read(secureStoreProvider).readAllApiKeys(),
+      ]);
+      final keys = results[1] as Map<String, String>;
       if (cookieStore.cookie == null || cookieStore.cookie!.isEmpty) {
         state = const AuthUnauthenticated();
         return;
       }
-
-      final api = _authApi(settings.serverUrl);
-      final keys = await ref.read(secureStoreProvider).readAllApiKeys();
       final lastOrgId = settings.lastOrgId;
 
       if (lastOrgId != null && keys.containsKey(lastOrgId)) {

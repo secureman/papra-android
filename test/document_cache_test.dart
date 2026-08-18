@@ -68,4 +68,39 @@ void main() {
     await cache.setPinned('doc_1', pinned: false);
     expect(await cache.getPinnedIds(), {'doc_2'});
   });
+
+  test('finalizeDownload makes the file visible to cachedFilePath', () async {
+    final cache = newCache();
+    final target = await cache.downloadPathFor('doc_abc', 'invoice.pdf');
+    expect(target, endsWith('.pdf'));
+
+    // A leftover .part file is not a valid cache entry.
+    await File('$target.part').writeAsBytes([1, 2, 3]);
+    expect(await cache.cachedFilePath('doc_abc'), isNull);
+
+    await cache.finalizeDownload('$target.part', target);
+    expect(await cache.cachedFilePath('doc_abc'), target);
+  });
+
+  test('deleteCachedFile frees the file and clears the index', () async {
+    final cache = newCache();
+    final target = await cache.downloadPathFor('doc_abc', 'invoice.pdf');
+    await File(target).writeAsBytes([1, 2, 3]);
+    await cache.finalizeDownload(target, target);
+
+    expect(await cache.cachedFilePath('doc_abc'), target);
+    await cache.deleteCachedFile('doc_abc');
+    expect(await cache.cachedFilePath('doc_abc'), isNull);
+  });
+
+  test('thumbnail PNGs round-trip through writeThumbnail/thumbnailPath', () async {
+    final cache = newCache();
+    expect(await cache.thumbnailPath('doc_abc'), isNull);
+
+    await cache.writeThumbnail('doc_abc', [137, 80, 78, 71]);
+    final path = await cache.thumbnailPath('doc_abc');
+    expect(path, isNotNull);
+    expect(path, endsWith('doc_abc.png'));
+    expect(File(path!).readAsBytesSync(), [137, 80, 78, 71]);
+  });
 }

@@ -19,6 +19,7 @@ import 'features/settings/settings_screen.dart';
 import 'features/shares/shares_screen.dart';
 import 'features/tagging_rules/tagging_rules_screen.dart';
 import 'features/tags/tags_screen.dart';
+import 'features/tags/tag_documents_screen.dart';
 import 'features/trash/trash_screen.dart';
 import 'home_shell.dart';
 import 'shared/widgets/splash_screen.dart';
@@ -85,6 +86,13 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/document/:documentId',
         builder: (context, state) => DocumentDetailScreen(
           documentId: state.pathParameters['documentId'] ?? '',
+        ),
+      ),
+      GoRoute(
+        path: '/tag-documents/:tagId',
+        builder: (context, state) => TagDocumentsScreen(
+          tagId: state.pathParameters['tagId'] ?? '',
+          initialTag: state.extra as PapraTag?,
         ),
       ),
       GoRoute(

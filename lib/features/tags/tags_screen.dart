@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/network/api_exception.dart';
 import '../../core/network/models.dart';
 import '../../shared/widgets/async_states.dart';
 import '../auth/auth_controller.dart';
+import '../documents/batch_download.dart';
 
 /// Preset tag colors (Material 700 shades). The fork requires a `color` on
 /// tag creation, so the picker always has a selection.
@@ -176,6 +178,19 @@ class _TagsScreenState extends ConsumerState<TagsScreen> {
     }
   }
 
+  /// Downloads every document carrying [tag] to a user-chosen folder.
+  Future<void> _downloadAll(PapraTag tag) async {
+    final client = ref.read(apiClientProvider);
+    if (client == null) return;
+    final message = await downloadSelectionToDevice(
+      context: context,
+      client: client,
+      title: 'Downloading “${tag.name}” documents…',
+      enumerate: () => documentsWithTag(client, tag.id),
+    );
+    if (message != null && message.isNotEmpty && mounted) _showSnack(message);
+  }
+
   Future<void> _deleteTag(PapraTag tag) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -273,6 +288,8 @@ class _TagsScreenState extends ConsumerState<TagsScreen> {
       trailing: PopupMenuButton<String>(
         onSelected: (action) {
           switch (action) {
+            case 'download':
+              _downloadAll(tag);
             case 'edit':
               _showTagDialog(tag: tag);
             case 'delete':
@@ -280,11 +297,15 @@ class _TagsScreenState extends ConsumerState<TagsScreen> {
           }
         },
         itemBuilder: (context) => const [
+          PopupMenuItem(value: 'download', child: Text('Download all documents')),
           PopupMenuItem(value: 'edit', child: Text('Edit')),
           PopupMenuItem(value: 'delete', child: Text('Delete')),
         ],
       ),
-      onTap: () => _showTagDialog(tag: tag),
+      onTap: () => context.push(
+        '/tag-documents/${tag.id}',
+        extra: tag,
+      ),
     );
   }
 

@@ -273,6 +273,36 @@ class _DocumentDetailScreenState extends ConsumerState<DocumentDetailScreen> {
     }
   }
 
+  /// Exports the original file to a user-chosen folder on the device (SAF).
+  Future<void> _downloadToDevice() async {
+    final client = ref.read(apiClientProvider);
+    final document = _document;
+    if (client == null || document == null || _downloading) return;
+
+    setState(() {
+      _downloading = true;
+      _downloadProgress = 0;
+    });
+    final result = await downloadDocumentToDevice(
+      client: client,
+      document: document,
+      onProgress: (fraction) {
+        if (mounted) setState(() => _downloadProgress = fraction);
+      },
+    );
+    if (!mounted) return;
+    setState(() {
+      _downloading = false;
+      _downloadProgress = 0;
+    });
+    if (result.cancelled) return;
+    if (result.error != null) {
+      _showSnack(result.error!);
+      return;
+    }
+    _showSnack('Saved “${document.name}”.');
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
@@ -459,13 +489,22 @@ class _DocumentDetailScreenState extends ConsumerState<DocumentDetailScreen> {
                 ],
               )
             else
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.tonalIcon(
-                  onPressed: _viewOriginal,
-                  icon: const Icon(Icons.open_in_new),
-                  label: const Text('View original file'),
-                ),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.tonalIcon(
+                      onPressed: _viewOriginal,
+                      icon: const Icon(Icons.open_in_new),
+                      label: const Text('View original file'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filledTonal(
+                    tooltip: 'Download to device',
+                    onPressed: _downloadToDevice,
+                    icon: const Icon(Icons.download),
+                  ),
+                ],
               ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,

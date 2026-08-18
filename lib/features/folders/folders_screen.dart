@@ -6,6 +6,7 @@ import '../../core/network/api_exception.dart';
 import '../../core/network/models.dart';
 import '../../shared/widgets/async_states.dart';
 import '../auth/auth_controller.dart';
+import '../documents/batch_download.dart';
 
 /// Folders tab: a management tree of the whole organization.
 ///
@@ -324,6 +325,20 @@ class _FoldersScreenState extends ConsumerState<FoldersScreen> {
     context.push('/documents/folder/${folder.id}', extra: folder.name);
   }
 
+  /// Downloads every document under [folder] (recursively) to a user-chosen
+  /// destination.
+  Future<void> _downloadFolder(PapraFolder folder) async {
+    final client = ref.read(apiClientProvider);
+    if (client == null) return;
+    final message = await downloadSelectionToDevice(
+      context: context,
+      client: client,
+      title: 'Downloading “${folder.name}”…',
+      enumerate: () => documentsInFolder(client, folderId: folder.id),
+    );
+    if (message != null && message.isNotEmpty && mounted) _showSnack(message);
+  }
+
   List<PapraFolder> get _sortedFolders {
     final list = [..._folders]
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
@@ -443,6 +458,8 @@ class _FoldersScreenState extends ConsumerState<FoldersScreen> {
         trailing: PopupMenuButton<String>(
           onSelected: (action) {
             switch (action) {
+              case 'download':
+                _downloadFolder(folder);
               case 'create':
                 _createFolder(parentId: folder.id);
               case 'rename':
@@ -454,6 +471,7 @@ class _FoldersScreenState extends ConsumerState<FoldersScreen> {
             }
           },
           itemBuilder: (context) => const [
+            PopupMenuItem(value: 'download', child: Text('Download all documents')),
             PopupMenuItem(value: 'create', child: Text('New subfolder')),
             PopupMenuItem(value: 'rename', child: Text('Rename')),
             PopupMenuItem(value: 'move', child: Text('Move to…')),
