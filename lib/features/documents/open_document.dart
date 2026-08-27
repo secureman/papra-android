@@ -23,14 +23,15 @@ String safeFileName(String name) {
 Future<({String? path, String? error})> downloadDocumentToCache({
   required ApiClient client,
   required PapraDocument document,
+  DocumentCache? cache,
   void Function(double fraction)? onProgress,
 }) async {
   try {
-    final cache = DocumentCache.instance;
-    final cached = await cache.cachedFilePath(document.id);
+    final resolved = cache ?? DocumentCache.instance;
+    final cached = await resolved.cachedFilePath(document.id);
     if (cached != null) return (path: cached, error: null);
 
-    final target = await cache.downloadPathFor(document.id, document.name);
+    final target = await resolved.downloadPathFor(document.id, document.name);
     final partPath = '$target.part';
     await client.downloadDocument(
       documentId: document.id,
@@ -39,7 +40,7 @@ Future<({String? path, String? error})> downloadDocumentToCache({
         if (total > 0) onProgress?.call(received / total);
       },
     );
-    await cache.finalizeDownload(partPath, target);
+    await resolved.finalizeDownload(partPath, target);
     return (path: target, error: null);
   } on PapraApiException catch (e) {
     return (path: null, error: e.message);

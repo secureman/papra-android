@@ -76,6 +76,11 @@ class _TagDocumentsScreenState extends ConsumerState<TagDocumentsScreen> {
         _loading = false;
         _error = null;
       });
+      unawaited(preloadThumbnails(
+        documents: documents,
+        cache: ref.read(documentCacheProvider),
+        client: ref.read(apiClientProvider),
+      ));
     } on PapraApiException catch (e) {
       if (!mounted) return;
       setState(() {

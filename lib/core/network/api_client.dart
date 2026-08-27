@@ -582,6 +582,22 @@ class ApiClient {
     );
   }
 
+  /// Starts the Google Drive OAuth connect flow and returns the authorization
+  /// URL to open in a browser. Used to re-issue an expired/revoked refresh
+  /// token so "Run backup now" works again for the destination.
+  Future<String> getGoogleDriveConnectUrl({String displayName = 'Google Drive'}) {
+    return _run(
+      () async {
+        final resp = await sessionDio.post(
+          _orgPath('/backups/google-drive/connect'),
+          data: {'displayName': displayName},
+        );
+        return asMap(resp.data)['authorizationUrl']?.toString() ?? '';
+      },
+      notifyAuthFailure: false,
+    );
+  }
+
   /// Validates destination credentials/settings before saving. Throws on
   /// failure; on success returns e.g. `{accountLabel: '...'}`.
   Future<Map<String, dynamic>> testBackupConnection({
@@ -703,6 +719,25 @@ class ApiClient {
     return _run(
       () => sessionDio.delete(
         _orgPath('/backups/destinations/$destinationId/runs/$runId'),
+      ),
+      notifyAuthFailure: false,
+    );
+  }
+
+  /// Claims a `ready_for_download` run from a local-folder destination —
+  /// one-shot: a second request gets a 404, same as an expired envelope.
+  /// Downloads the `.papra-backup` envelope to [savePath].
+  Future<void> downloadReadyBackupRun({
+    required String destinationId,
+    required String runId,
+    required String savePath,
+    void Function(int received, int total)? onReceiveProgress,
+  }) {
+    return _run(
+      () => sessionDio.download(
+        _orgPath('/backups/destinations/$destinationId/runs/$runId/download'),
+        savePath,
+        onReceiveProgress: onReceiveProgress,
       ),
       notifyAuthFailure: false,
     );

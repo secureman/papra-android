@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -7,6 +10,7 @@ import '../../core/network/models.dart';
 import '../../shared/utils/format.dart';
 import '../../shared/widgets/async_states.dart';
 import '../auth/auth_controller.dart';
+import '../documents/open_document.dart' show deleteFileIfExists, safeFileName;
 import 'backups_ui.dart';
 
 /// Backups hub: destinations list (schedule + next run), add destination,
@@ -23,6 +27,8 @@ class _BackupsScreenState extends ConsumerState<BackupsScreen> {
   BackupsStatusResponse? _status;
   bool _loading = true;
   String? _error;
+  bool _exporting = false;
+  bool _recovering = false;
 
   @override
   void initState() {
@@ -72,6 +78,89 @@ class _BackupsScreenState extends ConsumerState<BackupsScreen> {
   void _showSnack(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// One-off manual export of the whole organization straight to the device —
+  /// no destination, nothing persisted, not tracked in run history.
+  Future<void> _downloadBackupCopy() async {
+    final client = ref.read(apiClientProvider);
+    if (client == null || _exporting) return;
+    setState(() => _exporting = true);
+    try {
+      final dir = await FilePicker.getDirectoryPath(
+        dialogTitle: 'Choose where to save the backup',
+      );
+      if (dir == null || dir.isEmpty) return;
+
+      final fileName = safeFileName(
+        'papra-backup-${DateTime.now().toIso8601String().replaceAll(':', '-')}.papra-backup',
+      );
+      final target = '$dir/$fileName';
+      final partPath = '$target.part';
+      try {
+        await client.downloadBackupCopy(savePath: partPath);
+        await File(partPath).rename(target);
+        _showSnack('Backup downloaded.');
+      } on PapraApiException catch (e) {
+        await deleteFileIfExists(partPath);
+        _showSnack(e.message);
+      } on FileSystemException {
+        await deleteFileIfExists(partPath);
+        _showSnack('Could not write to the selected folder.');
+      }
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
+  /// Disaster recovery with no destination at all: pick an existing
+  /// `.papra-backup` file and upload it; documents are re-imported in the
+  /// background (poll via the restore job screen).
+  Future<void> _recoverFromFile() async {
+    final client = ref.read(apiClientProvider);
+    if (client == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Restore from a backup file?'),
+        content: const Text(
+          'Documents will be re-imported from the selected .papra-backup file. '
+          'Documents that already exist are skipped or untrashed.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Choose file'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final picked = await FilePicker.pickFile(type: FileType.any);
+    final path = picked?.path;
+    if (path == null || !mounted) return;
+
+    setState(() => _recovering = true);
+    try {
+      final jobId = await client.restoreBackupFromFile(
+        filePath: path,
+        fileName: picked!.name,
+      );
+      if (jobId.isEmpty) throw const PapraApiException(message: 'Server did not return a job id.');
+      if (mounted) await context.push('/backups/restore/$jobId');
+    } on PapraApiException catch (e) {
+      _showSnack(e.message);
+    } catch (_) {
+      _showSnack('Could not upload the backup file.');
+    } finally {
+      if (mounted) setState(() => _recovering = false);
+    }
   }
 
   Future<void> _addDestination() async {
@@ -355,6 +444,40 @@ class _BackupsScreenState extends ConsumerState<BackupsScreen> {
                     physics: const AlwaysScrollableScrollPhysics(),
                     padding: const EdgeInsets.all(16),
                     children: [
+                      if (_status?.isConfigured == true) ...[
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: _exporting ? null : _downloadBackupCopy,
+                                icon: _exporting
+                                    ? const SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(strokeWidth: 2),
+                                      )
+                                    : const Icon(Icons.download_outlined),
+                                label: const Text('Download a copy'),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: _recovering ? null : _recoverFromFile,
+                                icon: _recovering
+                                    ? const SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(strokeWidth: 2),
+                                      )
+                                    : const Icon(Icons.settings_backup_restore),
+                                label: const Text('Recover from file'),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                      ],
                       if (_status?.isConfigured == false) ...[
                         Card(
                           margin: EdgeInsets.zero,

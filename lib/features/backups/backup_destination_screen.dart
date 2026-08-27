@@ -1,12 +1,19 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:dio/dio.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/network/api_exception.dart';
 import '../../core/network/models.dart';
 import '../../shared/utils/format.dart';
 import '../../shared/widgets/async_states.dart';
 import '../auth/auth_controller.dart';
+import '../documents/open_document.dart' show deleteFileIfExists, safeFileName;
 import 'backups_ui.dart';
 
 /// Backup destination detail: info + schedule, run now, run history (with
@@ -26,6 +33,22 @@ class _BackupDestinationScreenState extends ConsumerState<BackupDestinationScree
   bool _loading = true;
   String? _error;
   bool _runningNow = false;
+  bool _reconnecting = false;
+  Timer? _pollTimer;
+
+  /// Runs whose envelope claim (local delivery) is currently in flight, so a
+  /// re-poll doesn't fire a second one-shot download for the same run.
+  final Set<String> _claimingRuns = {};
+
+  /// Last claim attempt per run — a failed attempt backs off before the next
+  /// poll retries (the poll can race the server registering the envelope).
+  final Map<String, DateTime> _lastClaimAttemptAt = {};
+
+  /// Ready runs whose folder picker the user dismissed — never re-prompt on
+  /// every poll; they can still save manually from the run list.
+  final Set<String> _dismissedRuns = {};
+
+  static const _claimRetryDelay = Duration(seconds: 5);
 
   @override
   void initState() {
@@ -33,7 +56,13 @@ class _BackupDestinationScreenState extends ConsumerState<BackupDestinationScree
     _load();
   }
 
-  Future<void> _load() async {
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _load({bool silent = false}) async {
     final client = ref.read(apiClientProvider);
     if (client == null) {
       setState(() {
@@ -42,7 +71,7 @@ class _BackupDestinationScreenState extends ConsumerState<BackupDestinationScree
       });
       return;
     }
-    setState(() => _loading = true);
+    if (!silent) setState(() => _loading = true);
     try {
       final runs = await client.listBackupRuns(_destination.id);
       if (!mounted) return;
@@ -51,6 +80,8 @@ class _BackupDestinationScreenState extends ConsumerState<BackupDestinationScree
         _loading = false;
         _error = null;
       });
+      _scheduleNextPoll();
+      await _maybeClaimLocalRuns();
     } on PapraApiException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -64,6 +95,19 @@ class _BackupDestinationScreenState extends ConsumerState<BackupDestinationScree
         _error = 'Something went wrong. Please try again.';
       });
     }
+  }
+
+  /// While a run is still in flight (or a local envelope waits to be claimed),
+  /// keep refreshing so the progress bars move and the claim happens promptly.
+  void _scheduleNextPoll() {
+    _pollTimer?.cancel();
+    final hasPendingWork = _runs.any(
+      (run) => run.isInProgress || run.status == 'ready_for_download',
+    );
+    if (!hasPendingWork) return;
+    _pollTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) _load(silent: true);
+    });
   }
 
   void _showSnack(String message) {
@@ -81,11 +125,38 @@ class _BackupDestinationScreenState extends ConsumerState<BackupDestinationScree
       final runId = await client.runBackup(_destination.id);
       if (runId.isEmpty) throw const PapraApiException(message: 'Server did not return a run id.');
       _showSnack('Backup started.');
-      _load();
+      _load(silent: true);
     } on PapraApiException catch (e) {
       _showSnack(e.message);
     } finally {
       if (mounted) setState(() => _runningNow = false);
+    }
+  }
+
+  /// Re-issues the Google Drive authorization (the stored refresh token dies
+  /// after Google revokes it — e.g. testing-mode OAuth apps expire tokens after
+  /// 7 days). Opens the OAuth consent URL in the browser; the destination's
+  /// run history and remote files stay intact once the handshake completes.
+  Future<void> _reconnect() async {
+    final client = ref.read(apiClientProvider);
+    if (client == null || _reconnecting) return;
+    setState(() => _reconnecting = true);
+    try {
+      final url =
+          await client.getGoogleDriveConnectUrl(displayName: _destination.displayName);
+      if (url.isEmpty) {
+        throw const PapraApiException(
+          message: 'Server did not return an authorization URL.',
+        );
+      }
+      final opened = await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+      if (!opened) _showSnack('Could not open the browser.');
+    } on PapraApiException catch (e) {
+      _showSnack(e.message);
+    } catch (_) {
+      _showSnack('Something went wrong. Please try again.');
+    } finally {
+      if (mounted) setState(() => _reconnecting = false);
     }
   }
 
@@ -266,6 +337,108 @@ class _BackupDestinationScreenState extends ConsumerState<BackupDestinationScree
   }
 
   // ── Runs ──────────────────────────────────────────────────────────────────
+
+  /// Local-folder destinations hold the finished envelope in memory for ~10
+  /// minutes with a one-shot download endpoint (see the server's
+  /// backups.local-delivery.service). As soon as a run reaches
+  /// `ready_for_download`, open the folder picker and stream it to the device.
+  Future<void> _maybeClaimLocalRuns() async {
+    if (_destination.driver != 'local') return;
+    for (final run in _runs) {
+      if (run.status != 'ready_for_download') continue;
+      if (_claimingRuns.contains(run.id) || _dismissedRuns.contains(run.id)) continue;
+      final lastAttempt = _lastClaimAttemptAt[run.id];
+      if (lastAttempt != null && DateTime.now().difference(lastAttempt) < _claimRetryDelay) {
+        continue;
+      }
+      _lastClaimAttemptAt[run.id] = DateTime.now();
+      _claimingRuns.add(run.id);
+      try {
+        await _claimLocalRun(run);
+      } finally {
+        _claimingRuns.remove(run.id);
+      }
+    }
+  }
+
+  Future<void> _claimLocalRun(PapraBackupRun run) async {
+    final client = ref.read(apiClientProvider);
+    if (client == null || !mounted) return;
+
+    final fileName =
+        safeFileName(run.remoteFileName ?? 'papra-backup-${DateTime.now().toIso8601String()}.papra-backup');
+
+    final String? dir;
+    try {
+      dir = await FilePicker.getDirectoryPath(
+        dialogTitle: 'Backup ready — choose where to save “$fileName”',
+      );
+    } catch (_) {
+      // Picker unavailable/failed — stop auto-prompting; manual Save still works.
+      if (!mounted) return;
+      setState(() => _dismissedRuns.add(run.id));
+      return;
+    }
+    if (!mounted) return;
+    if (dir == null || dir.isEmpty) {
+      setState(() => _dismissedRuns.add(run.id));
+      _showSnack('Backup ready — tap “Save” on the run to pick a folder before it expires.');
+      return;
+    }
+
+    final target = '$dir/$fileName';
+    final partPath = '$target.part';
+    try {
+      await client.downloadReadyBackupRun(
+        destinationId: _destination.id,
+        runId: run.id,
+        savePath: partPath,
+      );
+      await File(partPath).rename(target);
+      _showSnack('Backup saved.');
+      await _load(silent: true);
+    } on PapraApiException catch (e) {
+      await deleteFileIfExists(partPath);
+      // dio wraps save-path write failures in a DioException whose `error` is
+      // the underlying FileSystemException (scoped storage) — don't retry
+      // those, the folder simply isn't writable from Dart.
+      final cause = e.cause;
+      final underlying = cause is DioException ? cause.error : cause;
+      if (underlying is IOException) {
+        _showSnack('Could not write to the selected folder.');
+        if (!mounted) return;
+        setState(() => _dismissedRuns.add(run.id));
+        return;
+      }
+      _showSnack('Could not save the backup file.');
+      // The claim may have raced the server registering the envelope — leave
+      // the run unclaimed so the next poll retries after the backoff.
+      _scheduleNextPoll();
+    } on FileSystemException {
+      await deleteFileIfExists(partPath);
+      _showSnack('Could not write to the selected folder.');
+      if (!mounted) return;
+      setState(() => _dismissedRuns.add(run.id));
+    } catch (_) {
+      await deleteFileIfExists(partPath);
+      _showSnack('Could not save the backup file.');
+      _scheduleNextPoll();
+    }
+  }
+
+  /// Manual entry point for a ready local run (e.g. after dismissing the
+  /// automatic picker).
+  Future<void> _saveReadyRun(PapraBackupRun run) async {
+    if (_claimingRuns.contains(run.id)) return;
+    _dismissedRuns.remove(run.id);
+    _lastClaimAttemptAt.remove(run.id);
+    _claimingRuns.add(run.id);
+    try {
+      await _claimLocalRun(run);
+    } finally {
+      _claimingRuns.remove(run.id);
+    }
+  }
 
   Future<void> _restoreRun(PapraBackupRun run) async {
     final confirmed = await showDialog<bool>(
@@ -513,13 +686,22 @@ class _BackupDestinationScreenState extends ConsumerState<BackupDestinationScree
                                           _rename();
                                         case 'schedule':
                                           _editSchedule();
+                                        case 'reconnect':
+                                          _reconnect();
                                         case 'delete':
                                           _delete();
                                       }
                                     },
-                                    itemBuilder: (context) => const [
+                                    itemBuilder: (context) => [
                                       PopupMenuItem(value: 'rename', child: Text('Rename')),
                                       PopupMenuItem(value: 'schedule', child: Text('Edit schedule')),
+                                      if (d.driver == 'google_drive')
+                                        PopupMenuItem(
+                                          value: 'reconnect',
+                                          child: Text(_reconnecting
+                                              ? 'Reconnecting…'
+                                              : 'Reconnect Google Drive'),
+                                        ),
                                       PopupMenuItem(value: 'delete', child: Text('Delete destination')),
                                     ],
                                   ),
@@ -598,6 +780,10 @@ class _BackupDestinationScreenState extends ConsumerState<BackupDestinationScree
   Widget _buildRunTile(PapraBackupRun run, ColorScheme scheme) {
     final canRestore = run.status == 'succeeded' && (run.remoteFileId ?? '').isNotEmpty;
     final failed = run.status == 'failed';
+    final inProgress = run.isInProgress;
+    final readyToSave = run.status == 'ready_for_download';
+    final claiming = _claimingRuns.contains(run.id);
+    final progress = inProgress ? describeRunProgress(run) : null;
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       child: ListTile(
@@ -617,19 +803,50 @@ class _BackupDestinationScreenState extends ConsumerState<BackupDestinationScree
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text([
-              backupStatusLabel(run.status),
-              if (run.documentsCount != null) '${run.documentsCount} documents',
-              if (run.totalSizeBytes != null) formatBytes(run.totalSizeBytes!),
-            ].join(' · ')),
+            if (progress != null) ...[
+              Text(progress.label),
+              const SizedBox(height: 6),
+              LinearProgressIndicator(value: progress.percent),
+              const SizedBox(height: 6),
+            ]
+            else
+              Text([
+                backupStatusLabel(run.status),
+                if (run.documentsCount != null && !readyToSave)
+                  '${run.documentsCount} documents',
+                if (run.totalSizeBytes != null) formatBytes(run.totalSizeBytes!),
+              ].join(' · ')),
             if (failed && run.errorMessage != null && run.errorMessage!.isNotEmpty)
               Text(run.errorMessage!, maxLines: 2, overflow: TextOverflow.ellipsis,
                   style: TextStyle(color: scheme.error, fontSize: 12)),
+            if (failed && run.errorMessage != null && isOAuthAuthFailure(run.errorMessage!)) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Google Drive authorization expired — reconnect to back up again.',
+                style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
+              ),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: _reconnecting ? null : _reconnect,
+                  icon: _reconnecting
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.link, size: 16),
+                  label: Text(_reconnecting ? 'Reconnecting…' : 'Reconnect'),
+                ),
+              ),
+            ],
           ],
         ),
         trailing: PopupMenuButton<String>(
           onSelected: (action) {
             switch (action) {
+              case 'save':
+                _saveReadyRun(run);
               case 'restore':
                 _restoreRun(run);
               case 'verify':
@@ -639,10 +856,16 @@ class _BackupDestinationScreenState extends ConsumerState<BackupDestinationScree
             }
           },
           itemBuilder: (context) => [
+            if (readyToSave && _destination.driver == 'local')
+              PopupMenuItem(
+                value: 'save',
+                enabled: !claiming,
+                child: Text(claiming ? 'Saving…' : 'Save to device'),
+              ),
             if (canRestore) const PopupMenuItem(value: 'restore', child: Text('Restore')),
             if (run.status == 'succeeded')
               const PopupMenuItem(value: 'verify', child: Text('Verify integrity')),
-            const PopupMenuItem(value: 'delete', child: Text('Delete record')),
+            if (!inProgress) const PopupMenuItem(value: 'delete', child: Text('Delete record')),
           ],
         ),
       ),

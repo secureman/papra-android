@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pdfrx/pdfrx.dart';
 
+import '../../core/network/api_client.dart';
 import '../../core/network/models.dart';
 import '../../core/storage/document_cache.dart';
 import '../auth/auth_controller.dart';
@@ -30,6 +31,151 @@ bool isThumbnailable(PapraDocument document) {
   if (isPdfDocument(document)) return true;
   if (_imageExtensions.any(name.endsWith)) return true;
   return document.mimeType.toLowerCase().startsWith('image/');
+}
+
+/// A locally resolved thumbnail: the path to display, and whether it is the
+/// pre-rendered PNG (fast `Image.file`) or the original file.
+typedef ThumbnailResult = ({String path, bool isPng});
+
+/// docId → resolved thumbnail, shared across every thumbnail widget and the
+/// eager list preloader, so resolving once (even off-screen) paints all tiles
+/// instantly.
+final Map<String, ThumbnailResult> _cachedThumbnails = {};
+
+/// docIds currently being rendered to a persisted PNG. Stores the in-flight
+/// future so concurrent preloaders and widgets share a single render instead
+/// of rendering the same document twice.
+final Map<String, Future<void>> _generatingFutures = {};
+
+/// pdfrx is initialized lazily, the first time a PDF thumbnail needs the
+/// document API — keeping it off the app's startup path.
+Future<void>? _pdfrxInitFuture;
+
+/// Clears the shared preload state; tests call it between runs.
+@visibleForTesting
+void resetThumbnailCache() {
+  _cachedThumbnails.clear();
+  _generatingFutures.clear();
+}
+
+/// Resolves the best local file for [document]'s thumbnail:
+///
+///  1. pre-rendered thumbnail PNG — the fast path for repeat visits;
+///  2. original file already in the persistent cache (previously opened);
+///  3. otherwise a one-time, concurrency-limited download straight into the
+///     persistent cache.
+///
+/// The result is remembered in [_cachedThumbnails] so every widget (and any
+/// later preload pass) reuses it without I/O. Returns null when nothing could
+/// be resolved (e.g. offline with nothing cached).
+Future<ThumbnailResult?> resolveThumbnail({
+  required PapraDocument document,
+  required DocumentCache cache,
+  required ApiClient? client,
+}) async {
+  final docId = document.id;
+  final existing = _cachedThumbnails[docId];
+  if (existing != null) return existing;
+
+  final thumb = await cache.thumbnailPath(docId);
+  if (thumb != null) {
+    final result = (path: thumb, isPng: true);
+    _cachedThumbnails[docId] = result;
+    return result;
+  }
+
+  final cached = await cache.cachedFilePath(docId);
+  if (cached != null) {
+    final result = (path: cached, isPng: false);
+    _cachedThumbnails[docId] = result;
+    return result;
+  }
+
+  if (client == null) return null;
+
+  final download = await _DownloadLimiter.run(
+    () => downloadDocumentToCache(client: client, document: document, cache: cache),
+  );
+  if (download.error != null || download.path == null) return null;
+  final result = (path: download.path!, isPng: false);
+  _cachedThumbnails[docId] = result;
+  return result;
+}
+
+/// Renders a small PNG of [originalPath] (PDF page 1, or a downscaled image)
+/// and persists it next to the cache so the next visit needs no download.
+/// Concurrent callers for the same document share the in-flight render.
+Future<void> generateThumbnail({
+  required PapraDocument document,
+  required DocumentCache cache,
+  required String originalPath,
+}) {
+  final docId = document.id;
+  final inFlight = _generatingFutures[docId];
+  if (inFlight != null) return inFlight;
+  final future = _doGenerateThumbnail(
+    document: document,
+    cache: cache,
+    originalPath: originalPath,
+  );
+  _generatingFutures[docId] = future;
+  return future.whenComplete(() => _generatingFutures.remove(docId));
+}
+
+Future<void> _doGenerateThumbnail({
+  required PapraDocument document,
+  required DocumentCache cache,
+  required String originalPath,
+}) async {
+  final docId = document.id;
+  try {
+    final bytes = isPdfDocument(document)
+        ? await renderPdfThumbnail(originalPath)
+        : await downscaleImagePng(originalPath);
+    if (bytes == null || bytes.isEmpty) return;
+    await cache.writeThumbnail(docId, bytes);
+    final thumb = await cache.thumbnailPath(docId);
+    if (thumb != null) {
+      _cachedThumbnails[docId] = (path: thumb, isPng: true);
+    }
+  } catch (_) {
+    // Best effort — the original still displays fine.
+  }
+}
+
+/// Eagerly resolves thumbnails for [documents] so they are already painted
+/// (or downloading) by the time the user scrolls to them. Lazy list slivers
+/// only build the tiles in the viewport, so without this, thumbnail work
+/// would only start once each item scrolls into view.
+Future<void> preloadThumbnails({
+  required List<PapraDocument> documents,
+  required DocumentCache cache,
+  required ApiClient? client,
+}) async {
+  await Future.wait([
+    for (final document in documents)
+      if (isThumbnailable(document))
+        _preloadOne(document: document, cache: cache, client: client),
+  ]);
+}
+
+Future<void> _preloadOne({
+  required PapraDocument document,
+  required DocumentCache cache,
+  required ApiClient? client,
+}) async {
+  final result = await resolveThumbnail(
+    document: document,
+    cache: cache,
+    client: client,
+  );
+  if (result != null && !result.isPng) {
+    unawaited(generateThumbnail(
+      document: document,
+      cache: cache,
+      originalPath: result.path,
+    ));
+  }
 }
 
 /// Bounds how many thumbnail downloads run at once. A freshly logged-in list
@@ -58,6 +204,81 @@ class _DownloadLimiter {
   }
 }
 
+/// Renders page 1 of a PDF at thumbnail resolution. Public so the offline
+/// backup browser can reuse it for snapshot-local files.
+Future<Uint8List?> renderPdfThumbnail(String path) async {
+  _pdfrxInitFuture ??= pdfrxFlutterInitialize();
+  await _pdfrxInitFuture;
+  final document = await PdfDocument.openFile(path);
+  try {
+    if (document.pages.isEmpty) return null;
+    final page = document.pages.first;
+    final aspect = page.height == 0 ? 1.0 : page.width / page.height;
+    final targetWidth = _thumbnailMaxDimension;
+    final targetHeight = (targetWidth / aspect).round();
+    final image = await page.render(width: targetWidth, height: targetHeight);
+    try {
+      if (image == null) return null;
+      final uiImage = await _decodeBgra(
+        pixels: image.pixels,
+        width: image.width,
+        height: image.height,
+      );
+      try {
+        final data = await uiImage.toByteData(format: ui.ImageByteFormat.png);
+        return data?.buffer.asUint8List();
+      } finally {
+        uiImage.dispose();
+      }
+    } finally {
+      image?.dispose();
+    }
+  } finally {
+    await document.dispose();
+  }
+}
+
+/// dart:ui's [ui.decodeImageFromPixels] delivers its result through a
+/// callback; wrap it in a Future for ergonomics.
+Future<ui.Image> _decodeBgra({
+  required Uint8List pixels,
+  required int width,
+  required int height,
+}) {
+  final completer = Completer<ui.Image>();
+  ui.decodeImageFromPixels(
+    pixels,
+    width,
+    height,
+    ui.PixelFormat.bgra8888,
+    completer.complete,
+  );
+  return completer.future;
+}
+
+/// Downscales an image file to a small square PNG. Public so the offline
+/// backup browser can reuse it for snapshot-local files.
+Future<Uint8List?> downscaleImagePng(String path) async {
+  final bytes = await File(path).readAsBytes();
+  final codec = await ui.instantiateImageCodec(
+    bytes,
+    targetWidth: _thumbnailMaxDimension,
+    targetHeight: _thumbnailMaxDimension,
+    allowUpscaling: false,
+  );
+  try {
+    final frame = await codec.getNextFrame();
+    try {
+      final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+      return data?.buffer.asUint8List();
+    } finally {
+      frame.image.dispose();
+    }
+  } finally {
+    codec.dispose();
+  }
+}
+
 /// A rounded thumbnail for image/PDF documents. Falls back to a placeholder
 /// icon while downloading or for anything not thumbnailable.
 ///
@@ -81,17 +302,6 @@ class DocumentThumbnail extends ConsumerStatefulWidget {
 }
 
 class _DocumentThumbnailState extends ConsumerState<DocumentThumbnail> {
-  /// docId → local path, shared across every thumbnail widget.
-  static final Map<String, String> _cachedPaths = {};
-
-  /// docIds currently being rendered to a persisted PNG, so concurrent
-  /// thumbnails for the same document don't render twice.
-  static final Set<String> _generating = {};
-
-  /// pdfrx is initialized lazily, the first time a PDF thumbnail needs the
-  /// document API — keeping it off the app's startup path.
-  static Future<void>? _pdfrxInitFuture;
-
   String? _path;
   bool _isPersistedPng = false;
   bool _failed = false;
@@ -99,10 +309,10 @@ class _DocumentThumbnailState extends ConsumerState<DocumentThumbnail> {
   @override
   void initState() {
     super.initState();
-    final cached = _cachedPaths[widget.document.id];
+    final cached = _cachedThumbnails[widget.document.id];
     if (cached != null) {
-      _path = cached;
-      _isPersistedPng = false;
+      _path = cached.path;
+      _isPersistedPng = cached.isPng;
     } else {
       _load();
     }
@@ -112,144 +322,40 @@ class _DocumentThumbnailState extends ConsumerState<DocumentThumbnail> {
     final cache = ref.read(documentCacheProvider);
     final client = ref.read(apiClientProvider);
 
-    // 1. Pre-rendered thumbnail PNG — the fast path for repeat visits.
-    final thumb = await cache.thumbnailPath(widget.document.id);
-    if (thumb != null && mounted) {
-      _remember(thumb, isPng: true);
-      return;
-    }
-
-    // 2. Original file already in the persistent cache (previously opened).
-    final cached = await cache.cachedFilePath(widget.document.id);
-    if (cached != null) {
-      if (mounted) _remember(cached, isPng: false);
-      unawaited(_generateThumbnail(cached));
-      return;
-    }
-
-    if (client == null) {
-      if (mounted) setState(() => _failed = true);
-      return;
-    }
-
-    // 3. Download once (concurrency-limited), straight into the persistent
-    // cache so "previously viewed" documents stay available offline.
-    final result = await _DownloadLimiter.run(
-      () => downloadDocumentToCache(client: client, document: widget.document),
+    final result = await resolveThumbnail(
+      document: widget.document,
+      cache: cache,
+      client: client,
     );
     if (!mounted) return;
-    final path = result.path;
-    if (result.error != null || path == null) {
+    if (result == null) {
       setState(() => _failed = true);
       return;
     }
-    _remember(path, isPng: false);
-    unawaited(_generateThumbnail(path));
-  }
-
-  void _remember(String path, {required bool isPng}) {
-    _cachedPaths[widget.document.id] = path;
     setState(() {
-      _path = path;
-      _isPersistedPng = isPng;
+      _path = result.path;
+      _isPersistedPng = result.isPng;
     });
-  }
-
-  /// Renders a small PNG of the document (PDF page 1, or a downscaled image)
-  /// and persists it next to the cache so the next visit needs no download.
-  Future<void> _generateThumbnail(String originalPath) async {
-    final docId = widget.document.id;
-    if (_generating.contains(docId)) return;
-    _generating.add(docId);
-    try {
-      final bytes = isPdfDocument(widget.document)
-          ? await _renderPdfThumbnail(originalPath)
-          : await _downscaleImage(originalPath);
-      if (bytes == null || bytes.isEmpty) return;
-      await ref.read(documentCacheProvider).writeThumbnail(docId, bytes);
-      final thumb = await ref.read(documentCacheProvider).thumbnailPath(docId);
-      if (thumb != null && mounted) {
-        _cachedPaths[docId] = thumb;
-        setState(() {
-          _path = thumb;
-          _isPersistedPng = true;
-        });
-      }
-    } catch (_) {
-      // Best effort — the original still displays fine.
-    } finally {
-      _generating.remove(docId);
+    if (!result.isPng) {
+      unawaited(_upgradeToPng(cache, result.path));
     }
   }
 
-  Future<Uint8List?> _renderPdfThumbnail(String path) async {
-    _pdfrxInitFuture ??= pdfrxFlutterInitialize();
-    await _pdfrxInitFuture;
-    final document = await PdfDocument.openFile(path);
-    try {
-      if (document.pages.isEmpty) return null;
-      final page = document.pages.first;
-      final aspect = page.height == 0 ? 1.0 : page.width / page.height;
-      final targetWidth = _thumbnailMaxDimension;
-      final targetHeight = (targetWidth / aspect).round();
-      final image = await page.render(width: targetWidth, height: targetHeight);
-      try {
-        if (image == null) return null;
-        final uiImage = await _decodeBgra(
-          pixels: image.pixels,
-          width: image.width,
-          height: image.height,
-        );
-        try {
-          final data = await uiImage.toByteData(format: ui.ImageByteFormat.png);
-          return data?.buffer.asUint8List();
-        } finally {
-          uiImage.dispose();
-        }
-      } finally {
-        image?.dispose();
-      }
-    } finally {
-      await document.dispose();
-    }
-  }
-
-  /// dart:ui's [ui.decodeImageFromPixels] delivers its result through a
-  /// callback; wrap it in a Future for ergonomics.
-  Future<ui.Image> _decodeBgra({
-    required Uint8List pixels,
-    required int width,
-    required int height,
-  }) {
-    final completer = Completer<ui.Image>();
-    ui.decodeImageFromPixels(
-      pixels,
-      width,
-      height,
-      ui.PixelFormat.bgra8888,
-      completer.complete,
+  /// After the persisted PNG is rendered (by this widget or a preloader),
+  /// swap the original file for the smaller pre-rendered image.
+  Future<void> _upgradeToPng(DocumentCache cache, String originalPath) async {
+    await generateThumbnail(
+      document: widget.document,
+      cache: cache,
+      originalPath: originalPath,
     );
-    return completer.future;
-  }
-
-  Future<Uint8List?> _downscaleImage(String path) async {
-    final bytes = await File(path).readAsBytes();
-    final codec = await ui.instantiateImageCodec(
-      bytes,
-      targetWidth: _thumbnailMaxDimension,
-      targetHeight: _thumbnailMaxDimension,
-      allowUpscaling: false,
-    );
-    try {
-      final frame = await codec.getNextFrame();
-      try {
-        final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
-        return data?.buffer.asUint8List();
-      } finally {
-        frame.image.dispose();
-      }
-    } finally {
-      codec.dispose();
+    if (!mounted) return;
+    final upgraded = _cachedThumbnails[widget.document.id];
+    if (upgraded != null && upgraded.isPng && upgraded.path != _path) {
+      setState(() {
+        _path = upgraded.path;
+        _isPersistedPng = true;
+      });
     }
   }
 

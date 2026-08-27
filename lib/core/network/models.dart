@@ -581,6 +581,10 @@ class PapraBackupRun {
     this.remoteFileName,
     this.documentsCount,
     this.totalSizeBytes,
+    this.processedDocumentsCount = 0,
+    this.processedBytes,
+    this.totalRawBytes,
+    this.uploadedBytes,
     this.errorMessage,
     this.completedAt,
     this.createdAt = '',
@@ -594,6 +598,10 @@ class PapraBackupRun {
         remoteFileName: _optStr(json, 'remoteFileName'),
         documentsCount: _optInt(json, 'documentsCount'),
         totalSizeBytes: _optInt(json, 'totalSizeBytes'),
+        processedDocumentsCount: _int(json, 'processedDocumentsCount'),
+        processedBytes: _optInt(json, 'processedBytes'),
+        totalRawBytes: _optInt(json, 'totalRawBytes'),
+        uploadedBytes: _optInt(json, 'uploadedBytes'),
         errorMessage: _optStr(json, 'errorMessage'),
         completedAt: _optStr(json, 'completedAt'),
         createdAt: _str(json, 'createdAt'),
@@ -604,15 +612,31 @@ class PapraBackupRun {
   /// "manual" | "scheduled"
   final String trigger;
 
-  /// "pending" | "uploading" | "succeeded" | "failed"
+  /// "pending" | "packaging" | "uploading" | "ready_for_download" |
+  /// "succeeded" | "failed"
   final String status;
   final String? remoteFileId;
   final String? remoteFileName;
   final int? documentsCount;
   final int? totalSizeBytes;
+
+  /// Real packaging progress (fork): documents/bytes read+tared+encrypted so
+  /// far, out of [totalRawBytes] which is known upfront.
+  final int processedDocumentsCount;
+  final int? processedBytes;
+  final int? totalRawBytes;
+
+  /// Upload-phase progress: bytes sent to the destination so far, out of
+  /// [totalSizeBytes].
+  final int? uploadedBytes;
+
   final String? errorMessage;
   final String? completedAt;
   final String createdAt;
+
+  /// True while the run is still being worked on server-side.
+  bool get isInProgress =>
+      status == 'pending' || status == 'packaging' || status == 'uploading';
 }
 
 /// A background restore job, polled for progress (fork: `backups/restore-jobs/*`).
@@ -675,6 +699,10 @@ class PapraBackupRestoreJob {
   final String? startedAt;
   final String? completedAt;
   final String createdAt;
+
+  /// True while documents are actively being re-imported (the phase where
+  /// per-document ETA is meaningful).
+  bool get isRestoringPhase => status == 'restoring';
 }
 
 /// A backup file as reported by the destination driver

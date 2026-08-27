@@ -15,6 +15,8 @@ import 'features/documents/documents_screen.dart';
 import 'features/documents/pdf_viewer_screen.dart';
 import 'features/folders/folders_screen.dart';
 import 'features/intake_emails/intake_emails_screen.dart';
+import 'features/offline/offline_home_screen.dart';
+import 'features/offline/screens/offline_document_detail_screen.dart';
 import 'features/settings/settings_screen.dart';
 import 'features/shares/shares_screen.dart';
 import 'features/tagging_rules/tagging_rules_screen.dart';
@@ -32,13 +34,22 @@ final routerProvider = Provider<GoRouter>((ref) {
     redirect: (context, state) {
       final location = state.matchedLocation;
 
+      // The offline backup browser works without any account, so it stays
+      // reachable in every auth state (after the initial session restore).
+      // Same for the in-app PDF viewer: it renders a local file and never
+      // touches the network (offline documents open through it).
+      final isOfflineRoute =
+          location == '/offline' ||
+          location.startsWith('/offline/') ||
+          location == '/document-viewer';
+
       switch (auth) {
         case AuthUnknown():
           return location == '/splash' ? null : '/splash';
         case AuthUnauthenticated():
-          return location == '/login' ? null : '/login';
+          return location == '/login' || isOfflineRoute ? null : '/login';
         case AuthNeedsOrgSelection():
-          return location == '/orgs' ? null : '/orgs';
+          return location == '/orgs' || isOfflineRoute ? null : '/orgs';
         case AuthAuthenticated():
           if (location == '/splash' || location == '/login' || location == '/orgs') {
             return '/';
@@ -50,6 +61,16 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/splash', builder: (context, state) => const SplashScreen()),
       GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
       GoRoute(path: '/orgs', builder: (context, state) => const OrgPickerScreen()),
+      GoRoute(
+        path: '/offline',
+        builder: (context, state) => const OfflineHomeScreen(),
+      ),
+      GoRoute(
+        path: '/offline/document/:documentId',
+        builder: (context, state) => OfflineDocumentDetailScreen(
+          documentId: state.pathParameters['documentId'] ?? '',
+        ),
+      ),
       GoRoute(
         path: '/shares',
         builder: (context, state) => const SharesScreen(),

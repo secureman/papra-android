@@ -200,6 +200,14 @@ class _HomeShellState extends ConsumerState<HomeShell> {
                 },
               ),
               ListTile(
+                leading: const Icon(Icons.cloud_off_outlined),
+                title: const Text('Offline backup'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  context.push('/offline');
+                },
+              ),
+              ListTile(
                 leading: const Icon(Icons.cloud_outlined),
                 title: const Text('Backups'),
                 onTap: () {

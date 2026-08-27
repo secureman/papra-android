@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../core/network/api_exception.dart';
 import '../../../core/providers.dart';
@@ -188,6 +189,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                             child: CircularProgressIndicator(strokeWidth: 2.5),
                           )
                         : const Text('Sign in'),
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton.icon(
+                    onPressed: () => context.push('/offline'),
+                    icon: const Icon(Icons.cloud_off_outlined, size: 18),
+                    label: const Text('Browse offline backup'),
                   ),
                 ],
               ),

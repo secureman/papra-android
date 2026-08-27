@@ -8,6 +8,7 @@ import '../../core/network/models.dart';
 import '../../shared/utils/format.dart';
 import '../../shared/widgets/async_states.dart';
 import '../auth/auth_controller.dart';
+import 'backups_ui.dart';
 
 /// Polls a restore job (`backups/restore-jobs/job/:id`) every 2 seconds and
 /// renders the phase, byte/document progress and final counts. Stops polling
@@ -99,6 +100,8 @@ class _RestoreProgressScreenState extends ConsumerState<RestoreProgressScreen> {
 
     final isTerminal = _terminalStates.contains(job.status);
     final succeeded = job.status == 'succeeded';
+    final downloadEta = _describeDownloadPhase(job);
+    final restoreEta = _describeRestorePhase(job);
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -149,15 +152,14 @@ class _RestoreProgressScreenState extends ConsumerState<RestoreProgressScreen> {
                 const SizedBox(height: 16),
                 _progressBar(
                   label: 'Downloading',
-                  value: _fraction(job.downloadedBytes, job.totalBytes),
-                  detail: _bytesProgress(job.downloadedBytes, job.totalBytes),
+                  value: downloadEta.percent,
+                  detail: downloadEta.label,
                 ),
                 const SizedBox(height: 12),
                 _progressBar(
                   label: 'Restoring documents',
-                  value: _fraction(job.processedDocumentsCount, job.totalDocumentsCount),
-                  detail: '${job.processedDocumentsCount} / '
-                      '${job.totalDocumentsCount ?? '?'} documents',
+                  value: restoreEta.percent,
+                  detail: restoreEta.label,
                 ),
                 if (isTerminal) ...[
                   const Divider(height: 32),
@@ -179,15 +181,68 @@ class _RestoreProgressScreenState extends ConsumerState<RestoreProgressScreen> {
     );
   }
 
-  double? _fraction(int? part, int? total) {
-    if (total == null || total <= 0 || part == null) return null;
-    return (part / total).clamp(0.0, 1.0);
+  /// Rough ETA from average throughput so far — good enough to be useful
+  /// without pretending to a precision the data doesn't have. Mirrors the
+  /// server web client's estimateRestoreEta.
+  ({String label, double? percent}) _describeDownloadPhase(PapraBackupRestoreJob job) {
+    final downloaded = job.downloadedBytes;
+    final total = job.totalBytes;
+
+    if (job.status != 'downloading') {
+      if (downloaded != null && downloaded > 0) {
+        final percent = total != null && total > 0 ? (downloaded / total).clamp(0.0, 1.0) : null;
+        return (label: '${formatBytes(downloaded)} downloaded', percent: percent);
+      }
+      return (label: '', percent: null);
+    }
+    if (downloaded == null || downloaded == 0) {
+      return (label: 'Waiting for data…', percent: null);
+    }
+
+    final sizeLabel = total != null && total > 0
+        ? '${formatBytes(downloaded)} / ${formatBytes(total)}'
+        : formatBytes(downloaded);
+
+    if (total == null || total <= 0 || job.startedAt == null) {
+      return (label: sizeLabel, percent: null);
+    }
+
+    final elapsedMs =
+        DateTime.now().difference(DateTime.parse(job.startedAt!)).inMilliseconds;
+    if (elapsedMs <= 0) return (label: sizeLabel, percent: null);
+    final bytesPerMs = downloaded / elapsedMs;
+    final remainingMs = ((total - downloaded) / bytesPerMs).round();
+    return (
+      label: '$sizeLabel · ${formatEtaLabel(remainingMs)}',
+      percent: (downloaded / total).clamp(0.0, 1.0),
+    );
   }
 
-  String _bytesProgress(int? downloaded, int? total) {
-    if (downloaded == null) return '';
-    if (total == null) return formatBytes(downloaded);
-    return '${formatBytes(downloaded)} / ${formatBytes(total)}';
+  ({String label, double? percent}) _describeRestorePhase(PapraBackupRestoreJob job) {
+    final total = job.totalDocumentsCount;
+    final processed = job.processedDocumentsCount;
+
+    if (job.status == 'pending') return (label: 'Starting…', percent: null);
+    if (!job.isRestoringPhase) {
+      if (total == null || total == 0) return (label: '', percent: null);
+      return (label: '$processed/$total documents', percent: processed / total);
+    }
+    if (total == null || total == 0) return (label: 'Preparing…', percent: null);
+
+    final percent = (processed / total).clamp(0.0, 1.0);
+    if (job.startedAt == null || processed == 0) {
+      return (label: '$processed/$total documents', percent: percent);
+    }
+
+    final elapsedMs =
+        DateTime.now().difference(DateTime.parse(job.startedAt!)).inMilliseconds;
+    if (elapsedMs <= 0) return (label: '$processed/$total documents', percent: percent);
+    final perDocumentMs = elapsedMs / processed;
+    final remainingMs = ((total - processed) * perDocumentMs).round();
+    return (
+      label: '$processed/$total documents · ${formatEtaLabel(remainingMs)}',
+      percent: percent,
+    );
   }
 
   String _statusLabel(String status) => switch (status) {

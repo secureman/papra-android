@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/network/api_exception.dart';
 import '../../core/network/models.dart';
+import '../../core/storage/document_cache.dart';
 import '../../shared/utils/format.dart';
 import '../../shared/widgets/async_states.dart';
 import '../auth/auth_controller.dart';
@@ -60,6 +63,7 @@ class _TrashScreenState extends ConsumerState<TrashScreen> {
         _loading = false;
         _error = null;
       });
+      _preloadThumbnails(resp.documents);
     } on PapraApiException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -92,10 +96,21 @@ class _TrashScreenState extends ConsumerState<TrashScreen> {
         _hasMore = _documents.length < resp.documentsCount;
         _loadingMore = false;
       });
+      _preloadThumbnails(resp.documents);
     } catch (_) {
       if (!mounted) return;
       setState(() => _loadingMore = false);
     }
+  }
+
+  /// Starts thumbnail resolution for the whole list so tiles paint instantly
+  /// instead of only loading the thumbnails of items scrolled into view.
+  void _preloadThumbnails(List<PapraDocument> documents) {
+    unawaited(preloadThumbnails(
+      documents: documents,
+      cache: ref.read(documentCacheProvider),
+      client: ref.read(apiClientProvider),
+    ));
   }
 
   void _showSnack(String message) {

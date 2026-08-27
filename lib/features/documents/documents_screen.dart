@@ -221,6 +221,17 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
       _loading = false;
       _error = null;
     });
+    _preloadThumbnails(_documents);
+  }
+
+  /// Starts thumbnail resolution for the whole list so tiles paint instantly
+  /// instead of only loading the thumbnails of items scrolled into view.
+  void _preloadThumbnails(List<PapraDocument> documents) {
+    unawaited(preloadThumbnails(
+      documents: documents,
+      cache: ref.read(documentCacheProvider),
+      client: ref.read(apiClientProvider),
+    ));
   }
 
   Future<void> _loadMore() async {
@@ -245,6 +256,7 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
         _hasMore = _documents.length < resp.documentsCount;
         _loadingMore = false;
       });
+      _preloadThumbnails(resp.documents);
     } catch (_) {
       setState(() => _loadingMore = false);
     }

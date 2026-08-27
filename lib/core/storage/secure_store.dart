@@ -9,6 +9,7 @@ class SecureStore {
 
   static const _apiKeyPrefix = 'api_key:';
   static const _sessionCookieKey = 'session_cookie';
+  static const _backupKekKey = 'backup_kek';
 
   Future<void> saveApiKey({required String orgId, required String token}) =>
       _storage.write(key: '$_apiKeyPrefix$orgId', value: token);
@@ -30,6 +31,13 @@ class SecureStore {
   Future<String?> readSessionCookie() => _storage.read(key: _sessionCookieKey);
 
   Future<void> deleteSessionCookie() => _storage.delete(key: _sessionCookieKey);
+
+  /// The server's BACKUPS_KEK, needed to decrypt imported backup archives.
+  Future<void> saveBackupKek(String kek) => _storage.write(key: _backupKekKey, value: kek);
+
+  Future<String?> readBackupKek() => _storage.read(key: _backupKekKey);
+
+  Future<void> deleteBackupKek() => _storage.delete(key: _backupKekKey);
 
   Future<void> clearAuth() => _storage.deleteAll();
 }

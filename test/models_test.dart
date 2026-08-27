@@ -229,6 +229,10 @@ void main() {
         'remoteFileName': 'papra-backup-abc123.papra-backup',
         'documentsCount': 42,
         'totalSizeBytes': 1048576,
+        'processedDocumentsCount': 42,
+        'processedBytes': 900000,
+        'totalRawBytes': 1048600,
+        'uploadedBytes': 1048576,
         'completedAt': '2026-08-01T01:05:00.000Z',
         'createdAt': '2026-08-01T01:00:00.000Z',
       };
@@ -236,6 +240,28 @@ void main() {
       expect(run.status, 'succeeded');
       expect(run.documentsCount, 42);
       expect(run.totalSizeBytes, 1048576);
+      expect(run.processedDocumentsCount, 42);
+      expect(run.processedBytes, 900000);
+      expect(run.totalRawBytes, 1048600);
+      expect(run.uploadedBytes, 1048576);
+      expect(run.isInProgress, isFalse);
+    });
+
+    test('flags in-flight runs for polling', () {
+      for (final status in ['pending', 'packaging', 'uploading']) {
+        expect(
+          PapraBackupRun(id: 'bkrn-x', status: status).isInProgress,
+          isTrue,
+          reason: status,
+        );
+      }
+      for (final status in ['ready_for_download', 'succeeded', 'failed']) {
+        expect(
+          PapraBackupRun(id: 'bkrn-x', status: status).isInProgress,
+          isFalse,
+          reason: status,
+        );
+      }
     });
 
     test('parses a restore job', () {
